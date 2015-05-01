@@ -1,0 +1,594 @@
+Tornadoes are more likely over smooth terrain
+=============================================
+
+Note: The data are updated through 2014. Attribute names are now all lower case.
+```{r}
+setwd("~/Dropbox/Tornadoes/TerrainRoughness")
+download.file(url = "http://www.spc.noaa.gov/gis/svrgis/zipped/tornado.zip",
+              destfile = "tornado.zip")
+unzip("tornado.zip")
+library("rgdal")
+TornL = readOGR(dsn = "torn", layer = "torn", 
+                stringsAsFactors = FALSE)
+library("raster")
+r = raster(xmn = -102, xmx = -95,
+           ymn = 36, ymx = 42,
+           resolution = .25)
+sp = as(r, 'SpatialPolygons')
+spT = spTransform(sp, CRS(proj4string(TornL)))
+```
+
+```{r}
+library("ggmap")
+#Map = get_openstreetmap(bbox = c(-101, 35, -94, 37))
+Map = get_map(location = c(-98.5, 39), 
+              source = "google",
+              zoom = 6,
+              color = "bw",
+              maptype = "terrain")
+p1 = ggmap(Map, dev = "extent") +
+  geom_segment(aes(x = -102, xend = -95, y = 36, yend = 36), 
+             color = "red") +
+  geom_segment(aes(x = -102, xend = -95, y = 42, yend = 42), 
+             color = "red") +
+  geom_segment(aes(x = -102, xend = -102, y = 36, yend = 42), 
+             color = "red") +
+  geom_segment(aes(x = -95, xend = -95, y = 36, yend = 42), 
+             color = "red") +
+  labs(x = expression(paste("Longitude (", degree, "W)")), 
+       y = expression(paste("Latitude (", degree, "N)")))
+```
+
+```{r}
+library("maps")
+library("maptools")
+library("grid")
+source('~/Dropbox/ASS_Spring2015/ScaleBarNorth.R')
+p1 = p1 + scaleBar(lon = -105, lat = 34, 
+              distanceLon = 100, distanceLat = 15,
+              distanceLegend = 35, dist.unit = "km",
+#              orientation = FALSE,
+              arrow.length = 50, arrow.distance = 60, 
+              arrow.North.size = 6)
+p1 + theme(panel.grid.minor = element_line(colour = NA), 
+           panel.grid.minor = element_line(colour = NA),
+           panel.background = element_rect(fill = NA, colour = NA), 
+           axis.text.x = element_blank(),
+	         axis.text.y = element_blank(), 
+           axis.ticks.x = element_blank(),
+	         axis.ticks.y = element_blank(), 
+           axis.title = element_blank(),
+	         rect = element_blank())
+```
+**Figure 1** Study region.
+
+Remove duplicate tracks. Add a buffer to the tracks based on the width specified in the attribute table to create a spatial polygons data frame. Overlay paths onto the extent and return a vector indicating either NA (is not inside extent) or the cell number. Subset the tornadoes by the raster extent. Subset by no duplicates of this data frame.
+```{r}
+library("rgeos")
+Width = TornL$wid * .9144
+sum(Width[Width == 0])
+TornP = gBuffer(TornL, byid = TRUE, width = Width/2)
+
+tc = over(TornP, spT)
+TornP2 = subset(TornP, !is.na(tc))
+TornP2 = subset(TornP2, yr >= 1955)
+
+df = data.frame(SLAT = TornP2$slat, 
+                SLON = TornP2$slon, 
+                ELAT = TornP2$elat, 
+                ELON = TornP2$elon,
+                DATE = TornP2$date)
+dup = duplicated(df)
+sum(dup)
+sum(dup)/dim(TornP2@data)[1] * 100
+TornP3 = subset(TornP2, !dup)
+dim(TornP3@data)
+```
+
+Overlay the path polygons on the cell polygons and count the number in each cell.
+```{r}
+ct = over(spT, TornP3, returnList = TRUE)
+nT = sapply(ct, function(x) length(x))
+nt = r
+values(nt) = nT
+cellStats(nt, stat = "mean")
+cellStats(nt, stat = "sd")
+cellStats(nt, stat = "sd")^2/cellStats(nt, stat = "mean")
+```
+
+The result is a list. Each element of the list is a vector of row numbers from the attribute table corresponding to paths occurring in the cell. There are `r length(nT)` cells. The order of the list matches the order of the raster (upper left to lower right in lexigraphical order). From the list we get the length of each vector. This is done with the sapply() (simple apply) where the first argument is the list object and the second argument is a function. These counts are then placed onto the original raster with the values() function. The GIS overlay operation uses projected coordinates. The analysis/display uses geographic coordinates.
+
+### Create map
+
+Get county & state boundaries. Get the tornado tracks. Convert to the geographic coordinates of the raster.
+```{r}
+library("mapproj")
+library("maptools")
+ext = as.vector(extent(r))
+bndryC = map("county", fill = TRUE,
+            xlim = ext[1:2],
+            ylim = ext[3:4],
+            plot = FALSE)
+IDs = sapply(strsplit(bndryC$names, ":"), function(x) x[1])
+bndryCP = map2SpatialPolygons(bndryC, IDs = IDs,
+                              proj4string = CRS(projection(r)))
+bndryS = map("state", fill = TRUE,
+            xlim = ext[1:2],
+            ylim = ext[3:4],
+            plot = FALSE)
+IDs = sapply(strsplit(bndryS$names, ":"), function(x) x[1])
+bndrySP = map2SpatialPolygons(bndryS, IDs = IDs,
+                              proj4string = CRS(projection(r)))
+TornP3T = spTransform(TornP3, CRS(projection(r)))
+```
+
+```{r}
+library("rasterVis")
+library("wesanderson")
+range(values(nt))
+rng = seq(0, 50, 5)
+cr = wes_palette(name = "Zissou", n = 10, 
+                 type = "continuous")
+p2 = levelplot(nt, margin = FALSE, 
+          sub = expression(paste("Tornado Counts")), 
+          xlab = NULL, ylab = NULL, 
+          col.regions = cr, at = rng, 
+          colorkey = list(space = 'bottom'),
+          par.settings = list(fontsize = list(text = 15)))
+# nt2 = nt > 12
+#p2 = levelplot(nt2, margin = FALSE,
+#               xlab = NULL, ylab = NULL,
+#               colorkey = FALSE)
+
+p2 = p2 + 
+  latticeExtra::layer(sp.polygons(bndryCP, 
+                                  col = gray(.85), lwd = 1)) +
+  latticeExtra::layer(sp.polygons(bndrySP, 
+                                  col = gray(.05), lwd = 2)) +
+  latticeExtra::layer(sp.polygons(TornP3T, fill = gray(.4), 
+                                  col = gray(.5), alpha = .3))
+p2
+```
+**Figure 2** Tornado counts. Paths are shown in gray and the number of tornadoes intersecting each cell is shown with a color ramp. Row and column counts are shown with plots in the left and top margins respectively.
+
+### Get elevation raster from a DEM
+
+Digital elevation model data are available from http://www.viewfinderpanoramas.org/DEM/TIF15/ Get the elevation raster and crop it to the extent of the tornado raster r. Compute the elevation roughness with the terrain() function. Here roughness is the difference between the maximum and the minimum elevation in the cell and the eight surrounding cells. Match the resolution and origin of the elevation rasters with those of the tornado raster by degrading the resolution of elevation roughness. Compute the correlation between the number of tornadoes and surface roughness & elevation.
+```{r}
+#download.file(url = "http://www.viewfinderpanoramas.org/DEM/TIF15/15-H.ZIP",
+#              destfile = "15-H.ZIP", mode = "wb")
+#unzip("15-H.ZIP")
+#download.file(url = "http://myweb.fsu.edu/jelsner/data/15-H.tif.zip",
+#              destfile = "15-H.tif.zip", mode = "wb")
+#unzip("15-H.tif.zip")
+Elev = raster("15-H.tif")
+Elev = crop(Elev, nt)
+TR = terrain(Elev, opt = 'roughness')
+el = resample(aggregate(Elev, fact = c(nrow(r), ncol(r)), fun = mean), r)
+tr = resample(aggregate(TR, fact = c(nrow(r), ncol(r)), fun = mean), r)
+cellStats(el, stat = "mean"); cellStats(el, stat = "sd")
+cellStats(tr, stat = "mean"); cellStats(tr, stat = "sd")
+cor(values(el), values(nt)); cor(values(tr), values(nt))
+range(values(tr)); range(values(TR), na.rm = TRUE)
+```
+
+### Get a population raster
+
+Gridded Population of the World (GPW), v3. http://sedac.ciesin.columbia.edu/data/set/gpw-v3-population-density/data-download Values are persons per square km.  Download as grid and read as raster. Crop to extent of tornado raster and match the resolution of the tornado grid.
+```{r}
+#download.file(url = "http://myweb.fsu.edu/jelsner/data/usadens.zip",
+#              destfile = "usadens.zip")
+#unzip("usadens.zip")
+Pop = raster("usadens/usads00g/w001001.adf")
+Pop = crop(Pop, r)
+pop = resample(aggregate(Pop, fact = c(nrow(r), ncol(r)), fun = mean), r)
+cellStats(pop, stat = "mean"); cellStats(pop, stat = "sd")
+cor.test(values(pop), values(nt))
+cor.test(values(pop), values(el))
+cor.test(values(pop), values(tr))
+```
+
+Map the covariates.
+```{r}
+library("RColorBrewer")
+range(log2(values(pop)))
+rng = seq(-2, 8, 2)
+cr = brewer.pal(5, "Blues")
+labs = as.character(round(2^rng))
+p3a = levelplot(log2(pop), margin = FALSE, 
+          sub = expression(paste("         2000 Population Density (people per ", km^2, ")")), 
+          xlab = NULL, ylab = NULL, 
+          col.regions = cr, at = rng, 
+          colorkey = list(space = 'bottom', labels = labs),
+          par.settings = list(fontsize = list(text = 15)))
+p3a = p3a + 
+  latticeExtra::layer(sp.polygons(bndryCP, 
+                                  col = gray(.85), lwd = 1)) +
+  latticeExtra::layer(sp.polygons(bndrySP, 
+                                  col = gray(.15), lwd = 1))
+
+range(values(tr))
+rng = seq(0, 50, 10)
+cr = brewer.pal(5, "Greens")
+p3b = levelplot(tr, margin = FALSE, 
+          sub = expression("          Terrain Roughness (m)"), 
+          xlab = NULL, ylab = NULL, 
+          col.regions = cr, at = rng, 
+          colorkey = list(space = 'bottom'),
+          par.settings = list(fontsize = list(text = 15)))
+p3b = p3b + 
+  latticeExtra::layer(sp.polygons(bndryCP, 
+                                  col = gray(.85), lwd = 1)) +
+  latticeExtra::layer(sp.polygons(bndrySP, 
+                                  col = gray(.15), lwd = 1))
+
+p3a = update(p3a, main = textGrob("a", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
+p3b = update(p3b, main = textGrob("b", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
+#p3a = update(p2, main = textGrob("a", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
+library("gridExtra")
+print(grid.arrange(p3a, p3b, ncol = 2))
+```
+**Figure 3** Population density and terrain roughness.
+
+### Exploratory analysis
+
+Terrain roughness histogram.
+```{r}
+library("ggplot2")
+df = as.data.frame(values(tr))
+names(df) = 'tr'
+ggplot(df, aes(tr)) +
+  geom_histogram(binwidth = 3, color = "white") +
+  ylab("Number of Cells") +
+  xlab("Terrain Roughness (m)") +
+  theme_bw()
+```
+**Figure 4** Terrain roughness histogram.
+
+Scatter plots
+```{r}
+df = data.frame(nT = values(nt),
+                el = values(el),
+                tr = values(tr),
+                pop = values(pop))
+p5a = ggplot(df, aes(x = log2(pop), y = log(nT + 1))) +
+  geom_point() +
+  geom_smooth(method = lm) +
+  ylab("Number of Tornadoes (log)") +
+#  ylab(expression(paste("Number of Central Plains Tornadoes (1955-2014), .25", degree, "resolution"))) +
+  xlab(expression(paste("2000 Population Density (people per ", km^2, ")"))) +
+  scale_x_continuous(breaks = c(1, 2, 4, 8),
+                     labels = c(1, 2, 4, 8))
+p5b = ggplot(df, aes(x = tr, y = log(nT + 1))) +
+  geom_point() +
+  geom_smooth(method = lm) +
+#  geom_quantile(quantiles = c(.5, .75, .95, .99)) +
+  ylab("Number of Tornadoes (log)") +
+  xlab("Terrain Roughness (m)")
+p5a = p5a + ggtitle("a") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0))
+p5b = p5b + ggtitle("b") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0))  
+source("multiplot.txt")
+mat = matrix(c(1, 2), nrow = 1, byrow = TRUE)
+multiplot(p5a, p5b, layout = mat)
+```
+**Figure 5** Tornadoes versus population and terrain roughness. The number of tornadoes in each grid cell is given on a log scale. The population density is on a log (base two) scale.
+
+```{r}
+df$elF = cut(df$el, breaks = c(150, 300, 400, 500, 700, 900, 1200))
+levels(df$elF)[6] = "(900, 1200]"
+ggplot(df, aes(x = tr, y = log(nT + 1))) + 
+  geom_point() + 
+  facet_wrap(~ elF) +
+  geom_smooth(method = lm, se = FALSE) +
+    ylab("Number of Tornadoes (log)") +
+  xlab("Terrain Roughness (m)")
+```
+
+Histogram of the number of tornadoes
+```{r}
+p6 = ggplot(df, aes(x = nT)) + 
+  geom_histogram(binwidth = 2, color = "white") +
+  ylab("Number of Cells") +
+  xlab("Number of Tornadoes")
+#p6 + theme_bw()
+table(df$nT)
+```
+
+Compare with Poisson.
+```{r}
+N = length(df$nT)
+nTp = rpois(N, lambda = mean(df$nT))
+df2 = data.frame(value = c(df$nT, nTp), 
+                 type = rep(c("Observed", "Poisson"), each = N))
+p6a = ggplot(df2, aes(x = value)) + 
+  geom_histogram(binwidth = 2, color = "white") +
+  ylab("Number of Cells") +
+  xlab("Number of Tornadoes") +
+  facet_wrap(~ type) 
+p6a + theme_bw()
+```
+**Figure 6** Histogram of the number of tornadoes by grid cell. The most tornadoes in any cell is 48 and the fewest is one. 80 cells with counts eleven or twelve. Cell counts are more dispersed than a Poisson distribution.
+
+### Convert raster layers to polygons
+
+Convert raster layers to polygons. This is needed to model the data with INLA. Change the attribute name to nT in the spatial polygons data frame and add the elevation roughness as another column.
+```{r}
+spdf = as(nt, "SpatialPolygonsDataFrame")
+names(spdf) = "nT"
+spdf$el = values(el)
+spdf$tr = values(tr)
+spdf$pop = values(pop)
+spdfT = spTransform(spdf, CRS(proj4string(TornP3)))
+spdf$area = gArea(spdfT, byid = TRUE)
+spdf$l2pop = log2(spdf$pop)
+spdf$ID = 1:ncell(nt)
+cor.test(spdf$el, spdf$tr)
+cor.test(spdf$el, spdf$pop)
+cor.test(spdf$tr, spdf$pop)
+```
+
+### Spatial model
+
+Some controls for INLA. Use as needed.
+```{r}
+#source("http://www.math.ntnu.no/inla/givemeINLA.R")
+library("INLA")
+control = list(
+  predictor = list(compute = TRUE),
+  inla = list(strategy = "laplace", 
+              fast = FALSE,
+              stencil = 7,
+              npoints = 198,
+              int.strategy = "grid", 
+              dz = .5),
+  results = list(return.marginals.random = TRUE),
+  compute = list(config = TRUE, mlik = TRUE, cpo = TRUE, dic = TRUE, po = TRUE),
+  family = list(variant = 1, hyper = list(theta = list(prior = "loggamma", param = c(1, 1)))))
+```
+
+Spatial neighborhood definition as an inla graph
+```{r}
+library("spdep")
+nb = poly2nb(spdf)
+nb2INLA("g", nb)
+g = inla.read.graph("g")
+```
+
+A model for the smoothed tornado report rate. 
+```{r}
+formula0 = nT ~ f(ID, model = "besag", graph = g)
+model0  =  inla(formula0, family = "nbinomial", E = area/10^6,
+                data = spdf@data,
+                control.compute = control$compute)
+summary(model0)
+rSR0 = r
+values(rSR0) = (exp(model0$summary.random$ID$mean) - 1) * 100
+```
+
+Plot the smoothed report rate relative to the regional average.
+```{r}
+range(values(rSR0))
+rng = seq(-100, 150, 50)
+rngL = paste(rng, '%', sep = "")
+cr = rev(brewer.pal(7, "RdBu"))
+cr = cr[-(1)]
+p7a = levelplot(rSR0, margin = TRUE, 
+          sub = "Tornado Reports\n (Above/Below Regional Average)",
+          xlab = NULL, ylab = NULL, 
+          col.regions = cr, at = rng,
+          colorkey = list(at = rng, labels = rngL, col = cr),
+          par.settings = list(fontsize = list(text = 11)))
+p7a = p7a + 
+  latticeExtra::layer(sp.polygons(bndryCP, col = gray(.85), lwd = 1)) +
+  latticeExtra::layer(sp.polygons(bndrySP, col = gray(.05), lwd = 2)) +
+  latticeExtra::layer({SpatialPolygonsRescale(layout.north.arrow(type = 1), 
+             offset = c(-95.5, 41.2), 
+             scale = .75)})
+```
+
+Add covariates to the model
+```{r}
+formula1 = nT ~ f(ID, model = "besag", graph = g) + 
+                l2pop + tr + I(tr*el^2)
+model1 = inla(formula = formula1, family = "nbinomial", E = area/10^6,
+             data = spdf@data,
+             control.compute = control$compute)
+summary(model1)
+#plot(model1$marginals.fixed$`tr:el`)
+```
+
+```{r}
+formula2 = nT ~ f(ID, model = "besag", graph = g) + 
+                l2pop + tr + I(tr*el^2)
+model2 = inla(formula = formula2, family = "nbinomial", E = area/10^6,
+             data = spdf@data,
+             control.compute = control$compute)
+summary(model2)
+#plot(model2$marginals.fixed$`I(tr*el^2)`)
+
+rSR2 = r
+values(rSR2) = (exp(model2$summary.random$ID$mean) - 1) * 100
+range(values(rSR2))
+rng = seq(-100, 150, 50)
+rngL = paste(rng, '%', sep = "")
+cr = rev(brewer.pal(7, "RdBu"))
+cr = cr[-1]
+p7b = levelplot(rSR2, margin = TRUE, 
+          sub = "Adjusted Tornado Rate\n (Above/Below Regional Average)",
+          xlab = NULL, ylab = NULL, 
+          col.regions = cr, at = rng,
+          colorkey = list(at = rng, labels = rngL, col = cr),
+          par.settings = list(fontsize = list(text = 11)))
+
+p7b = p7b + 
+  latticeExtra::layer(sp.polygons(bndryCP, col = gray(.85), lwd = 1)) +
+  latticeExtra::layer(sp.polygons(bndrySP, col = gray(.05), lwd = 2)) +
+  latticeExtra::layer({SpatialPolygonsRescale(layout.north.arrow(type = 1), 
+             offset = c(-95.5, 41.2), 
+             scale = .75)})
+#  layer({SpatialPolygonsRescale(layout.scale.bar(),
+#                                offset = c(-101.5, 41.8),
+#                                scale = 1, fill = c("transparent", "black"))}) +
+#  layer(sp.text(loc = c(-101.5, 41.7), "0")) +
+#  layer(sp.text(loc = c(-100.1, 41.7), "100 km"))
+
+p7a = update(p7a, main = textGrob("a", x = unit(.05, "npc"),
+                                  gp = gpar(fontsize = 16)))
+p7b = update(p7b, main = textGrob("b", x = unit(.05, "npc"),
+                                  gp = gpar(fontsize = 16)))
+library("gridExtra")
+grid.arrange(p7a, p7b, ncol = 2)
+```
+**Figure 7** Smoothed and adjusted tornado reports.
+
+Function for plotting the density of the marginal term.
+```{r}
+ggplotmargin <- function(x, type, effect, xlab, ylab = "Posterior Density",
+                         int.value = c(value = 0, 5, 95),
+                         color = c("red", "gray", "gray")){
+xx = as.data.frame(inla.smarginal(x[[paste("marginals", type, sep=".")]][[effect]]))
+  out = ggplot(xx, aes(x, y)) + geom_line(size = 1) + ylab(ylab) + xlab(xlab)    
+if(length(int.value) == 0) int.value = 0
+int.value = lapply(int.value, function(x) if(is.character(x)) 
+  type.convert(x, as.is = TRUE) else x)
+int.value = lapply(int.value, function(x) if(is.character(x)) 
+  lapply(strsplit(x, "=")[[1]], type.convert, as.is = TRUE) else x)
+nx = names(int.value)
+if(!is.null(nx))
+   for(i in which(nx != ""))  int.value[[i]] = list(nx[i], int.value[[i]])
+    int.value = sapply(int.value, function(x) {
+                      if(is.numeric(x)) xx$x[which.max(cumsum(xx$y)/sum(xx$y) >= as.numeric(x/100))]
+                      else switch(x[[1]], 
+                      mean = sum(xx$y*xx$x)/sum(xx$y), 
+                      median = xx$x[which.max(cumsum(xx$y)/sum(xx$y) >=.5)],
+                      mode = xx$x[which.max(xx$y)],
+                      value = x[[2]],
+                      zero = 0)})
+
+if(length(color) <= length(int.value)) color = rep(color, length = length(int.value))
+for(i in 1:length(int.value)) out = out + geom_vline(xintercept = int.value[i], color = color[i]) 
+out
+}
+```
+
+```{r}
+results = model2
+results$marginals.fixed$tr[, 1] = (exp(-results$marginals.fixed$tr[, 1]) - 1) * 100
+results$marginals.fixed$l2pop[, 1] = (exp(results$marginals.fixed$l2pop[, 1]) - 1) * 100
+
+p8b = ggplotmargin(results, type = "fixed", effect = "tr", 
+             xlab = "% increase in tornado reports\n per meter decrease in terrain roughness")
+p8a = ggplotmargin(results, type = "fixed", effect = "l2pop", 
+             xlab = "% increase in tornado reports\n per doubling of population")
+p8a = p8a + ggtitle("a") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0))
+p8b = p8b + ggtitle("b") + theme_bw() +
+  theme(plot.title = element_text(hjust = 0))  
+source("multiplot.txt")
+mat = matrix(c(1, 2), nrow = 1, byrow = TRUE)
+multiplot(p8a, p8b, layout = mat)
+```
+**Figure 8** Fixed effects
+
+### Expand the domain, change resolution
+Add 2 degrees N/S and 1 degree E-W
+```{r}
+#r = raster(xmn = -103, xmx = -94,
+#           ymn = 32, ymx = 44,
+#           resolution = .25)
+r = raster(xmn = -102, xmx = -95,
+           ymn = 36, ymx = 42,
+           resolution = .25)
+sp = as(r, 'SpatialPolygons')
+spT = spTransform(sp, CRS(proj4string(TornL)))
+Width = TornL$wid * .9144
+sum(Width[Width == 0])
+TornP = gBuffer(TornL, byid = TRUE, width = Width/2)
+
+tc = over(TornP, spT)
+TornP2 = subset(TornP, !is.na(tc))
+TornP2 = subset(TornP2, yr >= 1955 & mag >= 0)
+
+df = data.frame(SLAT = TornP2$slat, 
+                SLON = TornP2$slon, 
+                ELAT = TornP2$elat, 
+                ELON = TornP2$elon,
+                DATE = TornP2$date)
+dup = duplicated(df)
+sum(dup)
+sum(dup)/dim(TornP2@data)[1] * 100
+TornP3 = subset(TornP2, !dup)
+dim(TornP3@data)
+```
+
+```{r}
+ct = over(spT, TornP3, returnList = TRUE)
+nT = sapply(ct, function(x) length(x))
+nt = r
+values(nt) = nT
+cellStats(nt, stat = "mean")
+cellStats(nt, stat = "sd")
+cellStats(nt, stat = "sd")^2/cellStats(nt, stat = "mean")
+
+Elev = raster("15-H.tif")
+Elev = crop(Elev, nt)
+#TR = terrain(Elev, opt = 'roughness')
+TR = terrain(Elev, opt = 'TRI')
+el = resample(aggregate(Elev, fact = c(nrow(r), ncol(r)), fun = mean), r)
+tr = resample(aggregate(TR, fact = c(nrow(r), ncol(r)), fun = mean), r)
+cellStats(el, stat = "mean"); cellStats(el, stat = "sd")
+cellStats(tr, stat = "mean"); cellStats(tr, stat = "sd")
+cor(values(el), values(nt)); cor(values(tr), values(nt))
+
+Pop = raster("usadens/usads00g/w001001.adf")
+Pop = crop(Pop, r)
+pop = resample(aggregate(Pop, fact = c(nrow(r), ncol(r)), fun = mean), r)
+cellStats(pop, stat = "mean"); cellStats(pop, stat = "sd")
+cor.test(values(pop), values(nt))
+cor.test(values(pop), values(el))
+cor.test(values(pop), values(tr))
+
+spdf = as(nt, "SpatialPolygonsDataFrame")
+names(spdf) = "nT"
+spdf$el = values(el)
+spdf$tr = values(tr)
+spdf$pop = values(pop)
+spdfT = spTransform(spdf, CRS(proj4string(TornP3)))
+spdf$area = gArea(spdfT, byid = TRUE)
+spdf$l2pop = log2(spdf$pop)
+spdf$ID = 1:ncell(nt)
+
+library("INLA")
+library("spdep")
+nb = poly2nb(spdf)
+nb2INLA("g", nb)
+g = inla.read.graph("g")
+
+control = list(
+  predictor = list(compute = TRUE),
+  inla = list(strategy = "laplace", 
+              fast = FALSE,
+              stencil = 7,
+              npoints = 198,
+              int.strategy = "grid", 
+              dz = .5),
+  results = list(return.marginals.random = TRUE),
+  compute = list(config = TRUE, mlik = TRUE, cpo = TRUE, dic = TRUE, po = TRUE),
+  family = list(variant = 1, hyper = list(theta = list(prior = "loggamma", param = c(1, 1)))))
+
+formula1 = nT ~ f(ID, model = "besag", graph = g) + 
+                 l2pop + tr + I(tr*el^2)
+model1 = inla(formula = formula1, family = "nbinomial", E = area/10^6,
+             data = spdf@data,
+             control.compute = control$compute)
+summary(model1)
+
+results = model1
+results$marginals.fixed$tr[, 1] = 
+  (exp(-results$marginals.fixed$tr[, 1]) - 1) * 100
+library("ggplot2")
+ggplotmargin(results, type = "fixed", effect = "tr", 
+  xlab = "% decrease in tornado reports\n per meter increase in elevation roughness")
+```
