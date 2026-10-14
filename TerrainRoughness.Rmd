@@ -1,594 +1,264 @@
-Tornadoes are more likely over smooth terrain
-=============================================
+---
+title: "Terrain roughness and tornado reports in the central Great Plains"
+author: "James B. Elsner"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+params:
+  start_year: 1955
+  end_year: 2025
+  xmin: -102
+  xmax: -95
+  ymin: 36
+  ymax: 42
+  resolution: 0.25
+  min_rating: -1
+  spatial_k: 200
+  run_inla: false
+---
 
-Note: The data are updated through 2014. Attribute names are now all lower case.
-```{r}
-setwd("~/Dropbox/Tornadoes/TerrainRoughness")
-download.file(url = "http://www.spc.noaa.gov/gis/svrgis/zipped/tornado.zip",
-              destfile = "tornado.zip")
-unzip("tornado.zip")
-library("rgdal")
-TornL = readOGR(dsn = "torn", layer = "torn", 
-                stringsAsFactors = FALSE)
-library("raster")
-r = raster(xmn = -102, xmx = -95,
-           ymn = 36, ymx = 42,
-           resolution = .25)
-sp = as(r, 'SpatialPolygons')
-spT = spTransform(sp, CRS(proj4string(TornL)))
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = FALSE,
+                      fig.width = 9, fig.height = 6, dpi = 120)
+library(sf)
+library(terra)
+library(ggplot2)
+source("R/analysis.R")
+set.seed(2025)
+theme_set(theme_minimal(base_size = 12))
+stopifnot(params$start_year >= 1955, params$end_year <= 2025,
+          params$start_year <= params$end_year)
+dir.create("outputs", showWarnings = FALSE)
 ```
 
-```{r}
-library("ggmap")
-#Map = get_openstreetmap(bbox = c(-101, 35, -94, 37))
-Map = get_map(location = c(-98.5, 39), 
-              source = "google",
-              zoom = 6,
-              color = "bw",
-              maptype = "terrain")
-p1 = ggmap(Map, dev = "extent") +
-  geom_segment(aes(x = -102, xend = -95, y = 36, yend = 36), 
-             color = "red") +
-  geom_segment(aes(x = -102, xend = -95, y = 42, yend = 42), 
-             color = "red") +
-  geom_segment(aes(x = -102, xend = -102, y = 36, yend = 42), 
-             color = "red") +
-  geom_segment(aes(x = -95, xend = -95, y = 36, yend = 42), 
-             color = "red") +
-  labs(x = expression(paste("Longitude (", degree, "W)")), 
-       y = expression(paste("Latitude (", degree, "N)")))
+# Scope and data
+
+This update examines **reported tornado segments**, rather than assuming that
+terrain causes tornado formation. The default study domain and 0.25-degree grid
+match the original analysis: 102–95°W and 36–42°N. The period is
+`r params$start_year`–`r params$end_year`, inclusive. All years come from
+[NOAA NCEI Storm Events](https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/),
+using the annual *details* files. The data preparation script checks that each
+annual file contains records through December; this does not guarantee every
+individual tornado has been recorded or finalized.
+
+**The response differs from the 2015 analysis.** NCEI records tornadoes by event
+ID and may split a tornado at county or forecast-office boundaries. Each distinct
+event ID intersecting a cell contributes one count; two segments of one tornado
+can therefore contribute two counts to the same cell. A single segment can also
+intersect multiple cells. These are not counts of unique tornadoes, genesis
+locations, or independent observations. We do not splice SPC whole tracks through
+2024 together with NCEI segments for 2025. Segmentation, reporting changes, and
+missing coordinates can affect inference. The original Rmd is preserved in
+`archive/TerrainRoughness-2015.Rmd`.
+
+Run `Rscript scripts/download_data.R` once before rendering. Downloads are cached;
+source filenames, retrieval times and checksums are in `data/source_manifest.csv`.
+The small national tornado extract is versioned, while large raw downloads are
+ignored. No Google Maps key or personal filesystem paths are required.
+
+```{r inputs}
+grid <- make_grid(c(params$xmin, params$xmax, params$ymin, params$ymax), params$resolution)
+cells <- grid$cells
+reports <- read_reports("data/processed/ncei_tornadoes_1955_2025.csv.gz",
+                        params$start_year, params$end_year, params$min_rating)
+counts <- count_reports(reports$tracks, cells)
+regional <- reports$tracks[counts$regional_ids, ]
+cells$count <- counts$counts
+manifest <- readr::read_csv("data/source_manifest.csv", show_col_types = FALSE)
+knitr::kable(manifest[manifest$year >= params$end_year - 2 &
+                       manifest$year <= params$end_year, c("year", "tornado_records", "retrieved_utc")])
 ```
 
-```{r}
-library("maps")
-library("maptools")
-library("grid")
-source('~/Dropbox/ASS_Spring2015/ScaleBarNorth.R')
-p1 = p1 + scaleBar(lon = -105, lat = 34, 
-              distanceLon = 100, distanceLat = 15,
-              distanceLegend = 35, dist.unit = "km",
-#              orientation = FALSE,
-              arrow.length = 50, arrow.distance = 60, 
-              arrow.North.size = 6)
-p1 + theme(panel.grid.minor = element_line(colour = NA), 
-           panel.grid.minor = element_line(colour = NA),
-           panel.background = element_rect(fill = NA, colour = NA), 
-           axis.text.x = element_blank(),
-	         axis.text.y = element_blank(), 
-           axis.ticks.x = element_blank(),
-	         axis.ticks.y = element_blank(), 
-           axis.title = element_blank(),
-	         rect = element_blank())
-```
-**Figure 1** Study region.
+## Geometry and quality control
 
-Remove duplicate tracks. Add a buffer to the tracks based on the width specified in the attribute table to create a spatial polygons data frame. Overlay paths onto the extent and return a vector indicating either NA (is not inside extent) or the cell number. Subset the tornadoes by the raster extent. Subset by no duplicates of this data frame.
-```{r}
-library("rgeos")
-Width = TornL$wid * .9144
-sum(Width[Width == 0])
-TornP = gBuffer(TornL, byid = TRUE, width = Width/2)
+Paths are straight lines between the reported endpoints, not surveyed damage
+polygons. Buffer radius is half the reported width, converted from yards to
+metres, in EPSG:5070. Zero or missing widths retain a line or point. Missing end
+coordinates use the valid start point; invalid start coordinates are excluded.
+Event IDs must be unique. Unknown intensity is included by default; `min_rating`
+can restrict the analysis to F/EF0 or stronger (`0`) or F/EF1+ (`1`).
 
-tc = over(TornP, spT)
-TornP2 = subset(TornP, !is.na(tc))
-TornP2 = subset(TornP2, yr >= 1955)
-
-df = data.frame(SLAT = TornP2$slat, 
-                SLON = TornP2$slon, 
-                ELAT = TornP2$elat, 
-                ELON = TornP2$elon,
-                DATE = TornP2$date)
-dup = duplicated(df)
-sum(dup)
-sum(dup)/dim(TornP2@data)[1] * 100
-TornP3 = subset(TornP2, !dup)
-dim(TornP3@data)
+```{r quality}
+raw <- readr::read_csv("data/processed/ncei_tornadoes_1955_2025.csv.gz",
+                       show_col_types = FALSE)
+quality <- data.frame(year = params$start_year:params$end_year)
+quality$national_records <- vapply(quality$year, function(y) sum(raw$YEAR == y), integer(1))
+quality$located_records <- vapply(quality$year, function(y) sum(reports$tracks$YEAR == y), integer(1))
+quality$regional_records <- vapply(quality$year, function(y) sum(regional$YEAR == y), integer(1))
+quality$not_used <- quality$national_records - quality$located_records
+readr::write_csv(quality, "outputs/annual_quality.csv")
+knitr::kable(data.frame(
+  item = c("Grid cells", "Regional event IDs", "Invalid start coordinates (national)",
+           "Regional missing endpoints", "Regional zero/unknown widths"),
+  value = c(nrow(cells), nrow(regional), reports$excluded_coordinates,
+            sum(regional$end_imputed), sum(regional$width_missing))))
+ggplot(quality, aes(year, regional_records)) + geom_col(fill = "steelblue") +
+  labs(x = NULL, y = "Regional tornado report segments per year")
+knitr::kable(quality[quality$not_used > 0, ], caption =
+  "National records not used: invalid start coordinates and, when selected, intensity filtering.")
 ```
 
-Overlay the path polygons on the cell polygons and count the number in each cell.
-```{r}
-ct = over(spT, TornP3, returnList = TRUE)
-nT = sapply(ct, function(x) length(x))
-nt = r
-values(nt) = nT
-cellStats(nt, stat = "mean")
-cellStats(nt, stat = "sd")
-cellStats(nt, stat = "sd")^2/cellStats(nt, stat = "mean")
+Missing coordinates are especially consequential in the early 1990s in this
+NCEI extract. Exclusions cannot be treated as a random sample or as zero tornado
+activity. A modern-period sensitivity analysis below reduces this particular
+historical data-quality issue. National exclusion counts do not establish how
+many missing reports belong to this study region.
+
+```{r domain-map, fig.cap="Report-segment counts on the original study grid."}
+states <- st_as_sf(maps::map("state", plot = FALSE, fill = TRUE))
+ggplot() + geom_sf(data = cells, aes(fill = count), color = NA) +
+  geom_sf(data = states, fill = NA, color = "gray25", linewidth = 0.3) +
+  coord_sf(xlim = c(params$xmin, params$xmax), ylim = c(params$ymin, params$ymax), expand = FALSE) +
+  scale_fill_viridis_c(name = "Segments") + labs(x = NULL, y = NULL)
 ```
 
-The result is a list. Each element of the list is a vector of row numbers from the attribute table corresponding to paths occurring in the cell. There are `r length(nT)` cells. The order of the list matches the order of the raster (upper left to lower right in lexigraphical order). From the list we get the length of each vector. This is done with the sapply() (simple apply) where the first argument is the list object and the second argument is a function. These counts are then placed onto the original raster with the values() function. The GIS overlay operation uses projected coordinates. The analysis/display uses geographic coordinates.
+# Terrain and population covariates
 
-### Create map
+Elevation is from the original [Viewfinder Panoramas 15-arc-second
+DEM](https://www.viewfinderpanoramas.org/DEM/TIF15/15-H.zip), in metres. Roughness
+is the maximum minus minimum elevation in a native DEM pixel and its eight
+neighbors. It is computed with a halo around the study region **before** averaging
+to the analysis grid. This is elevation roughness, not aerodynamic roughness, and
+its magnitude depends on DEM resolution. It is not interchangeable with TRI.
 
-Get county & state boundaries. Get the tornado tracks. Convert to the geographic coordinates of the raster.
-```{r}
-library("mapproj")
-library("maptools")
-ext = as.vector(extent(r))
-bndryC = map("county", fill = TRUE,
-            xlim = ext[1:2],
-            ylim = ext[3:4],
-            plot = FALSE)
-IDs = sapply(strsplit(bndryC$names, ":"), function(x) x[1])
-bndryCP = map2SpatialPolygons(bndryC, IDs = IDs,
-                              proj4string = CRS(projection(r)))
-bndryS = map("state", fill = TRUE,
-            xlim = ext[1:2],
-            ylim = ext[3:4],
-            plot = FALSE)
-IDs = sapply(strsplit(bndryS$names, ":"), function(x) x[1])
-bndrySP = map2SpatialPolygons(bndryS, IDs = IDs,
-                              proj4string = CRS(projection(r)))
-TornP3T = spTransform(TornP3, CRS(projection(r)))
+Population density is the original GPW v3 **year 2000** raster (people/km²) bundled
+in `usadens.zip`. Retaining this dated covariate supports comparison, but it does
+not measure population growth or year-specific reporting exposure. Raster
+covariates are averaged into the target cells. Missing coverage stops the run
+rather than silently removing cells.
+
+```{r covariates}
+covariates <- terrain_covariates(grid$raster, "data/raw/elevation/15-H.tif",
+                                "data/raw/usadens/usads00g/w001001.adf")
+x <- model_data(cells, counts$counts, covariates, params$end_year - params$start_year + 1)
+knitr::kable(summary(x[c("count", "elevation_m", "roughness_m", "population_2000")]))
+map_data <- cells
+map_data$roughness_m <- x$roughness_m
+map_data$log2_population <- x$log2_population
+ggplot(map_data) + geom_sf(aes(fill = roughness_m), color = NA) +
+  scale_fill_viridis_c(name = "Roughness (m)") + labs(x = NULL, y = NULL)
+ggplot(x, aes(roughness_m, count, color = log2_population)) + geom_point() +
+  scale_color_viridis_c(name = "log2(density + 1)") +
+  labs(x = "Mean terrain roughness (m)", y = "Tornado report segments")
 ```
 
-```{r}
-library("rasterVis")
-library("wesanderson")
-range(values(nt))
-rng = seq(0, 50, 5)
-cr = wes_palette(name = "Zissou", n = 10, 
-                 type = "continuous")
-p2 = levelplot(nt, margin = FALSE, 
-          sub = expression(paste("Tornado Counts")), 
-          xlab = NULL, ylab = NULL, 
-          col.regions = cr, at = rng, 
-          colorkey = list(space = 'bottom'),
-          par.settings = list(fontsize = list(text = 15)))
-# nt2 = nt > 12
-#p2 = levelplot(nt2, margin = FALSE,
-#               xlab = NULL, ylab = NULL,
-#               colorkey = FALSE)
+# Count models
 
-p2 = p2 + 
-  latticeExtra::layer(sp.polygons(bndryCP, 
-                                  col = gray(.85), lwd = 1)) +
-  latticeExtra::layer(sp.polygons(bndrySP, 
-                                  col = gray(.05), lwd = 2)) +
-  latticeExtra::layer(sp.polygons(TornP3T, fill = gray(.4), 
-                                  col = gray(.5), alpha = .3))
-p2
-```
-**Figure 2** Tornado counts. Paths are shown in gray and the number of tornadoes intersecting each cell is shown with a color ramp. Row and column counts are shown with plots in the left and top margins respectively.
+The reference model is negative binomial with population, centered roughness,
+centered elevation, and their interaction. The spatial model adds a penalized
+thin-plate smooth of projected cell centroids, estimated with REML. Exposure is
+cell area times years / 1,000, giving an offset for unequal geographic cell areas.
+The population term uses log2(density + 1), including zero-density cells. Its
+coefficient is per doubling of *density plus one*.
 
-### Get elevation raster from a DEM
+This revises the original model specification: the elevation interaction has
+both main effects, and the default spatial fit uses `mgcv` rather than INLA.
+The original Besag model is represented by an optional BYM2 extension below.
+Neither spatial specification eliminates all confounding or the dependence
+created by a path crossing multiple cells.
 
-Digital elevation model data are available from http://www.viewfinderpanoramas.org/DEM/TIF15/ Get the elevation raster and crop it to the extent of the tornado raster r. Compute the elevation roughness with the terrain() function. Here roughness is the difference between the maximum and the minimum elevation in the cell and the eight surrounding cells. Match the resolution and origin of the elevation rasters with those of the tornado raster by degrading the resolution of elevation roughness. Compute the correlation between the number of tornadoes and surface roughness & elevation.
-```{r}
-#download.file(url = "http://www.viewfinderpanoramas.org/DEM/TIF15/15-H.ZIP",
-#              destfile = "15-H.ZIP", mode = "wb")
-#unzip("15-H.ZIP")
-#download.file(url = "http://myweb.fsu.edu/jelsner/data/15-H.tif.zip",
-#              destfile = "15-H.tif.zip", mode = "wb")
-#unzip("15-H.tif.zip")
-Elev = raster("15-H.tif")
-Elev = crop(Elev, nt)
-TR = terrain(Elev, opt = 'roughness')
-el = resample(aggregate(Elev, fact = c(nrow(r), ncol(r)), fun = mean), r)
-tr = resample(aggregate(TR, fact = c(nrow(r), ncol(r)), fun = mean), r)
-cellStats(el, stat = "mean"); cellStats(el, stat = "sd")
-cellStats(tr, stat = "mean"); cellStats(tr, stat = "sd")
-cor(values(el), values(nt)); cor(values(tr), values(nt))
-range(values(tr)); range(values(TR), na.rm = TRUE)
+```{r models}
+models <- fit_models(x, params$spatial_k)
+summary(models$nonspatial)
+summary(models$spatial)
+effects <- rbind(cbind(model = "Nonspatial NB", roughness_effect(models$nonspatial)),
+                 cbind(model = "Spatial NB GAM", roughness_effect(models$spatial)))
+knitr::kable(effects, digits = 3, caption = "Conditional rate ratios with approximate 95% intervals.")
 ```
 
-### Get a population raster
+For the spatial model, a 10 m increase in roughness at the regional mean elevation
+has estimated report-segment rate ratio
+**`r round(effects$rate_ratio[2], 3)`**
+(approximate 95% interval `r round(effects$lower_95[2], 3)`–`r round(effects$upper_95[2], 3)`).
+The effect changes with elevation because of the interaction. This estimate is an
+association in reports, not evidence that smoothing terrain changes tornado risk.
 
-Gridded Population of the World (GPW), v3. http://sedac.ciesin.columbia.edu/data/set/gpw-v3-population-density/data-download Values are persons per square km.  Download as grid and read as raster. Crop to extent of tornado raster and match the resolution of the tornado grid.
-```{r}
-#download.file(url = "http://myweb.fsu.edu/jelsner/data/usadens.zip",
-#              destfile = "usadens.zip")
-#unzip("usadens.zip")
-Pop = raster("usadens/usads00g/w001001.adf")
-Pop = crop(Pop, r)
-pop = resample(aggregate(Pop, fact = c(nrow(r), ncol(r)), fun = mean), r)
-cellStats(pop, stat = "mean"); cellStats(pop, stat = "sd")
-cor.test(values(pop), values(nt))
-cor.test(values(pop), values(el))
-cor.test(values(pop), values(tr))
+## Diagnostics and sensitivity
+
+```{r diagnostics}
+x$fitted <- as.numeric(predict(models$spatial, type = "response"))
+x$pearson_residual <- as.numeric(residuals(models$spatial, type = "pearson"))
+mgcv::gam.check(models$spatial)
+nb <- spdep::poly2nb(cells, queen = TRUE)
+weights <- spdep::nb2listw(nb, style = "W", zero.policy = FALSE)
+spdep::moran.mc(x$pearson_residual, weights, nsim = 999)
+ggplot(x, aes(fitted, pearson_residual)) + geom_point() + geom_hline(yintercept = 0) +
+  labs(x = "Fitted report-segment count", y = "Pearson residual")
 ```
 
-Map the covariates.
-```{r}
-library("RColorBrewer")
-range(log2(values(pop)))
-rng = seq(-2, 8, 2)
-cr = brewer.pal(5, "Blues")
-labs = as.character(round(2^rng))
-p3a = levelplot(log2(pop), margin = FALSE, 
-          sub = expression(paste("         2000 Population Density (people per ", km^2, ")")), 
-          xlab = NULL, ylab = NULL, 
-          col.regions = cr, at = rng, 
-          colorkey = list(space = 'bottom', labels = labs),
-          par.settings = list(fontsize = list(text = 15)))
-p3a = p3a + 
-  latticeExtra::layer(sp.polygons(bndryCP, 
-                                  col = gray(.85), lwd = 1)) +
-  latticeExtra::layer(sp.polygons(bndrySP, 
-                                  col = gray(.15), lwd = 1))
+The Moran permutation diagnostic is exploratory, as residuals are estimated and
+segments are shared across cells. The default smooth allows up to 200 basis functions. A preliminary 60-function
+fit flagged insufficient basis size; increasing to 120 and 200 changed the
+full-period roughness rate ratio by less than 0.004. The smooth-basis check should
+be reviewed before treating the reported intervals as reliable. Spatial block validation,
+alternative grid resolutions, intensity restrictions, and time-varying reporting
+covariates are needed before predictive or causal use.
 
-range(values(tr))
-rng = seq(0, 50, 10)
-cr = brewer.pal(5, "Greens")
-p3b = levelplot(tr, margin = FALSE, 
-          sub = expression("          Terrain Roughness (m)"), 
-          xlab = NULL, ylab = NULL, 
-          col.regions = cr, at = rng, 
-          colorkey = list(space = 'bottom'),
-          par.settings = list(fontsize = list(text = 15)))
-p3b = p3b + 
-  latticeExtra::layer(sp.polygons(bndryCP, 
-                                  col = gray(.85), lwd = 1)) +
-  latticeExtra::layer(sp.polygons(bndrySP, 
-                                  col = gray(.15), lwd = 1))
-
-p3a = update(p3a, main = textGrob("a", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
-p3b = update(p3b, main = textGrob("b", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
-#p3a = update(p2, main = textGrob("a", x = unit(.05, "npc"), gp = gpar(fontsize = 17)))
-library("gridExtra")
-print(grid.arrange(p3a, p3b, ncol = 2))
-```
-**Figure 3** Population density and terrain roughness.
-
-### Exploratory analysis
-
-Terrain roughness histogram.
-```{r}
-library("ggplot2")
-df = as.data.frame(values(tr))
-names(df) = 'tr'
-ggplot(df, aes(tr)) +
-  geom_histogram(binwidth = 3, color = "white") +
-  ylab("Number of Cells") +
-  xlab("Terrain Roughness (m)") +
-  theme_bw()
-```
-**Figure 4** Terrain roughness histogram.
-
-Scatter plots
-```{r}
-df = data.frame(nT = values(nt),
-                el = values(el),
-                tr = values(tr),
-                pop = values(pop))
-p5a = ggplot(df, aes(x = log2(pop), y = log(nT + 1))) +
-  geom_point() +
-  geom_smooth(method = lm) +
-  ylab("Number of Tornadoes (log)") +
-#  ylab(expression(paste("Number of Central Plains Tornadoes (1955-2014), .25", degree, "resolution"))) +
-  xlab(expression(paste("2000 Population Density (people per ", km^2, ")"))) +
-  scale_x_continuous(breaks = c(1, 2, 4, 8),
-                     labels = c(1, 2, 4, 8))
-p5b = ggplot(df, aes(x = tr, y = log(nT + 1))) +
-  geom_point() +
-  geom_smooth(method = lm) +
-#  geom_quantile(quantiles = c(.5, .75, .95, .99)) +
-  ylab("Number of Tornadoes (log)") +
-  xlab("Terrain Roughness (m)")
-p5a = p5a + ggtitle("a") + theme_bw() +
-  theme(plot.title = element_text(hjust = 0))
-p5b = p5b + ggtitle("b") + theme_bw() +
-  theme(plot.title = element_text(hjust = 0))  
-source("multiplot.txt")
-mat = matrix(c(1, 2), nrow = 1, byrow = TRUE)
-multiplot(p5a, p5b, layout = mat)
-```
-**Figure 5** Tornadoes versus population and terrain roughness. The number of tornadoes in each grid cell is given on a log scale. The population density is on a log (base two) scale.
-
-```{r}
-df$elF = cut(df$el, breaks = c(150, 300, 400, 500, 700, 900, 1200))
-levels(df$elF)[6] = "(900, 1200]"
-ggplot(df, aes(x = tr, y = log(nT + 1))) + 
-  geom_point() + 
-  facet_wrap(~ elF) +
-  geom_smooth(method = lm, se = FALSE) +
-    ylab("Number of Tornadoes (log)") +
-  xlab("Terrain Roughness (m)")
-```
-
-Histogram of the number of tornadoes
-```{r}
-p6 = ggplot(df, aes(x = nT)) + 
-  geom_histogram(binwidth = 2, color = "white") +
-  ylab("Number of Cells") +
-  xlab("Number of Tornadoes")
-#p6 + theme_bw()
-table(df$nT)
-```
-
-Compare with Poisson.
-```{r}
-N = length(df$nT)
-nTp = rpois(N, lambda = mean(df$nT))
-df2 = data.frame(value = c(df$nT, nTp), 
-                 type = rep(c("Observed", "Poisson"), each = N))
-p6a = ggplot(df2, aes(x = value)) + 
-  geom_histogram(binwidth = 2, color = "white") +
-  ylab("Number of Cells") +
-  xlab("Number of Tornadoes") +
-  facet_wrap(~ type) 
-p6a + theme_bw()
-```
-**Figure 6** Histogram of the number of tornadoes by grid cell. The most tornadoes in any cell is 48 and the fewest is one. 80 cells with counts eleven or twelve. Cell counts are more dispersed than a Poisson distribution.
-
-### Convert raster layers to polygons
-
-Convert raster layers to polygons. This is needed to model the data with INLA. Change the attribute name to nT in the spatial polygons data frame and add the elevation roughness as another column.
-```{r}
-spdf = as(nt, "SpatialPolygonsDataFrame")
-names(spdf) = "nT"
-spdf$el = values(el)
-spdf$tr = values(tr)
-spdf$pop = values(pop)
-spdfT = spTransform(spdf, CRS(proj4string(TornP3)))
-spdf$area = gArea(spdfT, byid = TRUE)
-spdf$l2pop = log2(spdf$pop)
-spdf$ID = 1:ncell(nt)
-cor.test(spdf$el, spdf$tr)
-cor.test(spdf$el, spdf$pop)
-cor.test(spdf$tr, spdf$pop)
-```
-
-### Spatial model
-
-Some controls for INLA. Use as needed.
-```{r}
-#source("http://www.math.ntnu.no/inla/givemeINLA.R")
-library("INLA")
-control = list(
-  predictor = list(compute = TRUE),
-  inla = list(strategy = "laplace", 
-              fast = FALSE,
-              stencil = 7,
-              npoints = 198,
-              int.strategy = "grid", 
-              dz = .5),
-  results = list(return.marginals.random = TRUE),
-  compute = list(config = TRUE, mlik = TRUE, cpo = TRUE, dic = TRUE, po = TRUE),
-  family = list(variant = 1, hyper = list(theta = list(prior = "loggamma", param = c(1, 1)))))
-```
-
-Spatial neighborhood definition as an inla graph
-```{r}
-library("spdep")
-nb = poly2nb(spdf)
-nb2INLA("g", nb)
-g = inla.read.graph("g")
-```
-
-A model for the smoothed tornado report rate. 
-```{r}
-formula0 = nT ~ f(ID, model = "besag", graph = g)
-model0  =  inla(formula0, family = "nbinomial", E = area/10^6,
-                data = spdf@data,
-                control.compute = control$compute)
-summary(model0)
-rSR0 = r
-values(rSR0) = (exp(model0$summary.random$ID$mean) - 1) * 100
-```
-
-Plot the smoothed report rate relative to the regional average.
-```{r}
-range(values(rSR0))
-rng = seq(-100, 150, 50)
-rngL = paste(rng, '%', sep = "")
-cr = rev(brewer.pal(7, "RdBu"))
-cr = cr[-(1)]
-p7a = levelplot(rSR0, margin = TRUE, 
-          sub = "Tornado Reports\n (Above/Below Regional Average)",
-          xlab = NULL, ylab = NULL, 
-          col.regions = cr, at = rng,
-          colorkey = list(at = rng, labels = rngL, col = cr),
-          par.settings = list(fontsize = list(text = 11)))
-p7a = p7a + 
-  latticeExtra::layer(sp.polygons(bndryCP, col = gray(.85), lwd = 1)) +
-  latticeExtra::layer(sp.polygons(bndrySP, col = gray(.05), lwd = 2)) +
-  latticeExtra::layer({SpatialPolygonsRescale(layout.north.arrow(type = 1), 
-             offset = c(-95.5, 41.2), 
-             scale = .75)})
-```
-
-Add covariates to the model
-```{r}
-formula1 = nT ~ f(ID, model = "besag", graph = g) + 
-                l2pop + tr + I(tr*el^2)
-model1 = inla(formula = formula1, family = "nbinomial", E = area/10^6,
-             data = spdf@data,
-             control.compute = control$compute)
-summary(model1)
-#plot(model1$marginals.fixed$`tr:el`)
-```
-
-```{r}
-formula2 = nT ~ f(ID, model = "besag", graph = g) + 
-                l2pop + tr + I(tr*el^2)
-model2 = inla(formula = formula2, family = "nbinomial", E = area/10^6,
-             data = spdf@data,
-             control.compute = control$compute)
-summary(model2)
-#plot(model2$marginals.fixed$`I(tr*el^2)`)
-
-rSR2 = r
-values(rSR2) = (exp(model2$summary.random$ID$mean) - 1) * 100
-range(values(rSR2))
-rng = seq(-100, 150, 50)
-rngL = paste(rng, '%', sep = "")
-cr = rev(brewer.pal(7, "RdBu"))
-cr = cr[-1]
-p7b = levelplot(rSR2, margin = TRUE, 
-          sub = "Adjusted Tornado Rate\n (Above/Below Regional Average)",
-          xlab = NULL, ylab = NULL, 
-          col.regions = cr, at = rng,
-          colorkey = list(at = rng, labels = rngL, col = cr),
-          par.settings = list(fontsize = list(text = 11)))
-
-p7b = p7b + 
-  latticeExtra::layer(sp.polygons(bndryCP, col = gray(.85), lwd = 1)) +
-  latticeExtra::layer(sp.polygons(bndrySP, col = gray(.05), lwd = 2)) +
-  latticeExtra::layer({SpatialPolygonsRescale(layout.north.arrow(type = 1), 
-             offset = c(-95.5, 41.2), 
-             scale = .75)})
-#  layer({SpatialPolygonsRescale(layout.scale.bar(),
-#                                offset = c(-101.5, 41.8),
-#                                scale = 1, fill = c("transparent", "black"))}) +
-#  layer(sp.text(loc = c(-101.5, 41.7), "0")) +
-#  layer(sp.text(loc = c(-100.1, 41.7), "100 km"))
-
-p7a = update(p7a, main = textGrob("a", x = unit(.05, "npc"),
-                                  gp = gpar(fontsize = 16)))
-p7b = update(p7b, main = textGrob("b", x = unit(.05, "npc"),
-                                  gp = gpar(fontsize = 16)))
-library("gridExtra")
-grid.arrange(p7a, p7b, ncol = 2)
-```
-**Figure 7** Smoothed and adjusted tornado reports.
-
-Function for plotting the density of the marginal term.
-```{r}
-ggplotmargin <- function(x, type, effect, xlab, ylab = "Posterior Density",
-                         int.value = c(value = 0, 5, 95),
-                         color = c("red", "gray", "gray")){
-xx = as.data.frame(inla.smarginal(x[[paste("marginals", type, sep=".")]][[effect]]))
-  out = ggplot(xx, aes(x, y)) + geom_line(size = 1) + ylab(ylab) + xlab(xlab)    
-if(length(int.value) == 0) int.value = 0
-int.value = lapply(int.value, function(x) if(is.character(x)) 
-  type.convert(x, as.is = TRUE) else x)
-int.value = lapply(int.value, function(x) if(is.character(x)) 
-  lapply(strsplit(x, "=")[[1]], type.convert, as.is = TRUE) else x)
-nx = names(int.value)
-if(!is.null(nx))
-   for(i in which(nx != ""))  int.value[[i]] = list(nx[i], int.value[[i]])
-    int.value = sapply(int.value, function(x) {
-                      if(is.numeric(x)) xx$x[which.max(cumsum(xx$y)/sum(xx$y) >= as.numeric(x/100))]
-                      else switch(x[[1]], 
-                      mean = sum(xx$y*xx$x)/sum(xx$y), 
-                      median = xx$x[which.max(cumsum(xx$y)/sum(xx$y) >=.5)],
-                      mode = xx$x[which.max(xx$y)],
-                      value = x[[2]],
-                      zero = 0)})
-
-if(length(color) <= length(int.value)) color = rep(color, length = length(int.value))
-for(i in 1:length(int.value)) out = out + geom_vline(xintercept = int.value[i], color = color[i]) 
-out
+```{r sensitivity}
+if (params$start_year < 1996 && params$end_year >= 1996) {
+  recent <- reports$tracks[reports$tracks$YEAR >= 1996, ]
+  recent_counts <- count_reports(recent, cells)
+  recent_x <- model_data(cells, recent_counts$counts, covariates, params$end_year - 1996 + 1)
+  recent_models <- fit_models(recent_x, params$spatial_k)
+  readr::write_csv(roughness_effect(recent_models$spatial), "outputs/recent_roughness_effect.csv")
+  knitr::kable(roughness_effect(recent_models$spatial), digits = 3,
+               caption = paste("Sensitivity: 1996–", params$end_year, sep = ""))
 }
 ```
 
-```{r}
-results = model2
-results$marginals.fixed$tr[, 1] = (exp(-results$marginals.fixed$tr[, 1]) - 1) * 100
-results$marginals.fixed$l2pop[, 1] = (exp(results$marginals.fixed$l2pop[, 1]) - 1) * 100
+## Whole-tornado track sensitivity through 2024
 
-p8b = ggplotmargin(results, type = "fixed", effect = "tr", 
-             xlab = "% increase in tornado reports\n per meter decrease in terrain roughness")
-p8a = ggplotmargin(results, type = "fixed", effect = "l2pop", 
-             xlab = "% increase in tornado reports\n per doubling of population")
-p8a = p8a + ggtitle("a") + theme_bw() +
-  theme(plot.title = element_text(hjust = 0))
-p8b = p8b + ggtitle("b") + theme_bw() +
-  theme(plot.title = element_text(hjust = 0))  
-source("multiplot.txt")
-mat = matrix(c(1, 2), nrow = 1, byrow = TRUE)
-multiplot(p8a, p8b, layout = mat)
-```
-**Figure 8** Fixed effects
+The [SPC actual-tornado archive](https://www.spc.noaa.gov/wcm/) currently ends in
+2024. It provides whole tracks rather than continuing county/state segments.
+This separate fit uses those records over the selected period through 2024,
+with the same grid, covariates, model, width handling, and exposure convention.
+It addresses comparability with the original response, but does not provide
+whole-tornado counts for 2025. Differences from the NCEI fit reflect source,
+segmentation, coordinate availability, and period differences together.
 
-### Expand the domain, change resolution
-Add 2 degrees N/S and 1 degree E-W
-```{r}
-#r = raster(xmn = -103, xmx = -94,
-#           ymn = 32, ymx = 44,
-#           resolution = .25)
-r = raster(xmn = -102, xmx = -95,
-           ymn = 36, ymx = 42,
-           resolution = .25)
-sp = as(r, 'SpatialPolygons')
-spT = spTransform(sp, CRS(proj4string(TornL)))
-Width = TornL$wid * .9144
-sum(Width[Width == 0])
-TornP = gBuffer(TornL, byid = TRUE, width = Width/2)
-
-tc = over(TornP, spT)
-TornP2 = subset(TornP, !is.na(tc))
-TornP2 = subset(TornP2, yr >= 1955 & mag >= 0)
-
-df = data.frame(SLAT = TornP2$slat, 
-                SLON = TornP2$slon, 
-                ELAT = TornP2$elat, 
-                ELON = TornP2$elon,
-                DATE = TornP2$date)
-dup = duplicated(df)
-sum(dup)
-sum(dup)/dim(TornP2@data)[1] * 100
-TornP3 = subset(TornP2, !dup)
-dim(TornP3@data)
+```{r spc-sensitivity}
+if (params$start_year <= 2024) {
+  spc_end <- min(params$end_year, 2024)
+  spc <- read_reports("data/processed/spc_tracks_1955_2024.csv.gz",
+                      params$start_year, spc_end, params$min_rating)
+  spc_counts <- count_reports(spc$tracks, cells)
+  spc_x <- model_data(cells, spc_counts$counts, covariates, spc_end - params$start_year + 1)
+  spc_models <- fit_models(spc_x, params$spatial_k)
+  spc_effect <- roughness_effect(spc_models$spatial)
+  knitr::kable(spc_effect, digits = 3, caption = "SPC whole-track spatial NB sensitivity")
+  readr::write_csv(spc_effect, "outputs/spc_roughness_effect.csv")
+}
 ```
 
-```{r}
-ct = over(spT, TornP3, returnList = TRUE)
-nT = sapply(ct, function(x) length(x))
-nt = r
-values(nt) = nT
-cellStats(nt, stat = "mean")
-cellStats(nt, stat = "sd")
-cellStats(nt, stat = "sd")^2/cellStats(nt, stat = "mean")
+## Optional Bayesian spatial model
 
-Elev = raster("15-H.tif")
-Elev = crop(Elev, nt)
-#TR = terrain(Elev, opt = 'roughness')
-TR = terrain(Elev, opt = 'TRI')
-el = resample(aggregate(Elev, fact = c(nrow(r), ncol(r)), fun = mean), r)
-tr = resample(aggregate(TR, fact = c(nrow(r), ncol(r)), fun = mean), r)
-cellStats(el, stat = "mean"); cellStats(el, stat = "sd")
-cellStats(tr, stat = "mean"); cellStats(tr, stat = "sd")
-cor(values(el), values(nt)); cor(values(tr), values(nt))
+Set `run_inla: true` after installing INLA to fit a negative-binomial BYM2 model
+on queen adjacency, using scaled spatial effects and explicit PC priors. This
+extends the original intrinsic Besag model with an unstructured component.
+The fixed-effect intervals below are posterior quantiles transformed into rate
+ratios; a transformed coefficient density needs a Jacobian and is not obtained
+by simply relabeling the density axis.
 
-Pop = raster("usadens/usads00g/w001001.adf")
-Pop = crop(Pop, r)
-pop = resample(aggregate(Pop, fact = c(nrow(r), ncol(r)), fun = mean), r)
-cellStats(pop, stat = "mean"); cellStats(pop, stat = "sd")
-cor.test(values(pop), values(nt))
-cor.test(values(pop), values(el))
-cor.test(values(pop), values(tr))
+```{r inla, eval=params$run_inla}
+bayesian <- fit_bym2(x, cells)
+print(bayesian$summary.fixed)
+rr <- exp(bayesian$summary.fixed["roughness_10m", c("0.025quant", "0.5quant", "0.975quant")])
+knitr::kable(rr, digits = 3, caption = "Posterior roughness rate ratio at mean elevation")
+```
 
-spdf = as(nt, "SpatialPolygonsDataFrame")
-names(spdf) = "nT"
-spdf$el = values(el)
-spdf$tr = values(tr)
-spdf$pop = values(pop)
-spdfT = spTransform(spdf, CRS(proj4string(TornP3)))
-spdf$area = gArea(spdfT, byid = TRUE)
-spdf$l2pop = log2(spdf$pop)
-spdf$ID = 1:ncell(nt)
+# Reproducible outputs
 
-library("INLA")
-library("spdep")
-nb = poly2nb(spdf)
-nb2INLA("g", nb)
-g = inla.read.graph("g")
-
-control = list(
-  predictor = list(compute = TRUE),
-  inla = list(strategy = "laplace", 
-              fast = FALSE,
-              stencil = 7,
-              npoints = 198,
-              int.strategy = "grid", 
-              dz = .5),
-  results = list(return.marginals.random = TRUE),
-  compute = list(config = TRUE, mlik = TRUE, cpo = TRUE, dic = TRUE, po = TRUE),
-  family = list(variant = 1, hyper = list(theta = list(prior = "loggamma", param = c(1, 1)))))
-
-formula1 = nT ~ f(ID, model = "besag", graph = g) + 
-                 l2pop + tr + I(tr*el^2)
-model1 = inla(formula = formula1, family = "nbinomial", E = area/10^6,
-             data = spdf@data,
-             control.compute = control$compute)
-summary(model1)
-
-results = model1
-results$marginals.fixed$tr[, 1] = 
-  (exp(-results$marginals.fixed$tr[, 1]) - 1) * 100
-library("ggplot2")
-ggplotmargin(results, type = "fixed", effect = "tr", 
-  xlab = "% decrease in tornado reports\n per meter increase in elevation roughness")
+```{r outputs}
+readr::write_csv(x, "outputs/cell_analysis.csv")
+readr::write_csv(effects, "outputs/roughness_effects.csv")
+saveRDS(models, "outputs/models.rds")
+writeLines(capture.output(sessionInfo()), "outputs/sessionInfo.txt")
+knitr::kable(data.frame(source = c("Elevation archive", "Population archive", "Tornado extract"),
+  md5 = unname(tools::md5sum(c("data/raw/15-H.zip", "usadens.zip",
+    "data/processed/ncei_tornadoes_1955_2025.csv.gz")))))
+sessionInfo()
 ```

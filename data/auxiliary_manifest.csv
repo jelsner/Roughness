@@ -1,0 +1,4 @@
+source,url,md5
+SPC tracks,https://www.spc.noaa.gov/wcm/data/1950-2024_actual_tornadoes.csv,0a91807958e772384fba8e3be101a6f8
+Elevation,https://www.viewfinderpanoramas.org/DEM/TIF15/15-H.zip,0d9a43ba674f582387af043b0b3be481
+GPW v3 population 2000,Local archive usadens.zip from original repository,ac58f9ec63199bf6638da23546744b7f

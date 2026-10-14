@@ -1,0 +1,9 @@
+.Rhistory
+.RData
+.Rproj.user/
+.DS_Store
+data/raw/
+outputs/
+renv/library/
+renv/staging/
+*.part
