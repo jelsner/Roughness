@@ -123,6 +123,25 @@ Rscript scripts/setup.R
 Rscript scripts/render_genesis.R
 ```
 
+To repeat the full analysis using only weak F/EF0–1 tornadoes:
+
+```sh
+Rscript scripts/render_genesis.R weak
+```
+
+Open `outputs/genesis-weak/TornadoGenesis.html`. This retains the original sampled
+references and covariates for the selected tracks and reruns endpoint bootstraps,
+both conditional models, and all sensitivity fits. Unknown ratings are excluded.
+The report also directly compares F/EF0–1 and F/EF2+ using fully interacted
+adjusted slopes and day-clustered covariance; it saves the interaction estimates
+and rating audit alongside the cohort's main effects. The maximum whole-track
+damage rating does not measure intensity at genesis, and conditioning on it may
+introduce selection bias. This comparison remains exploratory.
+
+The renderer accepts `all` (default), `weak`, or `strong`, each with a separate
+output directory. The Rmd parameter `rating_group` selects the same cohorts when
+rendering directly. Existing prepared rasters and sites are reused without downloads.
+
 The small prepared site tables are versioned, so the default report renders
 without downloading land-cover rasters. To regenerate the real inputs from source:
 

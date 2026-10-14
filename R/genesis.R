@@ -15,6 +15,13 @@ valid_endpoint <- function(lon, lat) {
   is.finite(lon) & is.finite(lat) & lon >= -180 & lon <= 180 &
     lat >= -90 & lat <= 90 & lon != 0 & lat != 0
 }
+
+select_rating_tracks <- function(tracks, group=c("all","weak","strong")) {
+  group <- match.arg(group)
+  keep <- switch(group,all=rep(TRUE,nrow(tracks)),
+                 weak=tracks$mag %in% 0:1,strong=tracks$mag %in% 2:5)
+  tracks[keep, ,drop=FALSE]
+}
 prepare_whole_tracks <- function(path, bbox=c(-102,-95,36,42), years=2000:2024) {
   s <- readr::read_csv(path, show_col_types=FALSE, progress=FALSE)
   needed <- c("om","yr","mo","dy","date","slat","slon","elat","elon","sg","mag")
@@ -182,6 +189,34 @@ clogit_effect <- function(model, term="log2_z0") {
   se <- sqrt(stats::vcov(model)[term,term])
   data.frame(log_odds=b,robust_se=se,odds_ratio=exp(b),lower_95=exp(b-1.96*se),
              upper_95=exp(b+1.96*se))
+}
+
+rating_comparison <- function(x, tracks) {
+  # Rating is a track-level attribute: assign it to the case AND all alternatives.
+  x$mag <- tracks$mag[match(x$track_id,tracks$track_id)]
+  x <- x[x$mag %in% 0:5, ,drop=FALSE]
+  x$stronger <- as.integer(x$mag>=2)
+  groups <- tapply(x$track_id,x$stronger,function(z) length(unique(z)))
+  if(length(groups)!=2L || any(groups<20)) stop("Too few sets in a rating group")
+  terms <- c("log2_z0","elevation_100m","elevation_sd_10m","log2_population")
+  # Interact every slope so each rating group has its own nuisance adjustments.
+  # No group intercept: it is constant within track and absorbed by the strata.
+  for(term in terms) x[[paste0("stronger_",term)]] <- x$stronger*x[[term]]
+  fit <- fit_genesis_clogit(x,roughness=paste(c(terms,paste0("stronger_",terms)),collapse=" + "),
+                            adjusted=FALSE)
+  b <- stats::coef(fit); v <- stats::vcov(fit)
+  contrast <- function(weights,label) {
+    w <- setNames(rep(0,length(b)),names(b)); w[names(weights)] <- weights
+    estimate <- sum(w*b); se <- sqrt(as.numeric(t(w)%*%v%*%w))
+    data.frame(contrast=label,log_odds=estimate,robust_se=se,
+      odds_ratio=exp(estimate),lower_95=exp(estimate-1.96*se),
+      upper_95=exp(estimate+1.96*se),p_two_sided=2*stats::pnorm(-abs(estimate/se)))
+  }
+  effects <- rbind(contrast(c(log2_z0=1),"F/EF0–1 slope"),
+    contrast(c(log2_z0=1,stronger_log2_z0=1),"F/EF2+ slope"),
+    contrast(c(stronger_log2_z0=1),"F/EF2+ / F/EF0–1 odds-ratio ratio"))
+  list(model=fit,effects=effects,sets=data.frame(group=c("F/EF0–1","F/EF2+"),
+    matched_sets=as.integer(groups)))
 }
 
 paired_difference <- function(x, bootstrap=999L, seed=20261014) {

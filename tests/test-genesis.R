@@ -72,3 +72,39 @@ test_that("conditional model recovers an imposed negative selection effect", {
   expect_true(!is.null(fit$naive.var))
   expect_lt(clogit_effect(fit)$upper_95,1)
 })
+
+test_that("rating filters exclude unknowns without altering retained tracks", {
+  tracks <- data.frame(track_id=letters[1:8],mag=c(-9,0:5,NA))
+  expect_identical(select_rating_tracks(tracks,"all"),tracks)
+  expect_identical(select_rating_tracks(tracks,"weak"),tracks[2:3,])
+  expect_identical(select_rating_tracks(tracks,"strong"),tracks[4:7,])
+  expect_error(select_rating_tracks(tracks,"other"))
+})
+
+test_that("rating interaction recovers group slopes and excludes unknown ratings", {
+  set.seed(104)
+  n <- 400L
+  tracks <- data.frame(track_id=seq_len(n),mag=rep(c(0,1,2,3),each=n/4))
+  x <- data.frame(track_id=rep(tracks$track_id,each=5),
+    event_date=as.Date("2000-01-01")+rep(seq_len(n)%%100,each=5),
+    log2_z0=rnorm(n*5),elevation_100m=rnorm(n*5),
+    elevation_sd_10m=rnorm(n*5),log2_population=rnorm(n*5),case=0L)
+  for(i in seq_len(n)) {
+    j <- which(x$track_id==i)
+    beta <- if(tracks$mag[i]<2) -1.3 else .2
+    x$case[sample(j,1,prob=exp(beta*x$log2_z0[j]+.3*x$elevation_100m[j]))] <- 1L
+  }
+  z <- rating_comparison(x,tracks)
+  weak <- fit_genesis_clogit(x[x$track_id %in% tracks$track_id[tracks$mag<2],])
+  strong <- fit_genesis_clogit(x[x$track_id %in% tracks$track_id[tracks$mag>=2],])
+  expect_equal(z$effects$log_odds[1],unname(coef(weak)[["log2_z0"]]),tolerance=1e-7)
+  expect_equal(z$effects$log_odds[2],unname(coef(strong)[["log2_z0"]]),tolerance=1e-7)
+  expect_equal(z$effects$log_odds[3],z$effects$log_odds[2]-z$effects$log_odds[1],tolerance=1e-10)
+  expect_gt(z$effects$lower_95[3],1)
+  expect_true(!is.null(z$model$naive.var))
+  expect_equal(z$sets$matched_sets,c(200L,200L))
+  tracks$mag[1:5] <- -9
+  zz <- rating_comparison(x,tracks)
+  expect_equal(zz$sets$matched_sets,c(195L,200L))
+  expect_equal(nrow(zz$model$model),(n-5L)*5L)
+})
