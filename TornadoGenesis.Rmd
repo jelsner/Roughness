@@ -1,0 +1,369 @@
+---
+title: "Aerodynamic surface roughness and reported tornado genesis"
+author: "James B. Elsner"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+params:
+  radius_m: 1000
+  min_coverage: 0.99
+  bootstrap: 999
+  seed: 20261014
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE,message=FALSE,warning=TRUE,fig.width=9,fig.height=5,dpi=120)
+library(ggplot2)
+library(sf)
+source("R/genesis.R")
+theme_set(theme_minimal(base_size=12))
+root <- "data/processed/genesis"
+needed <- c("tracks.csv.gz","sites.csv.gz","static_covariates.csv.gz",
+            "landcover_fractions.csv.gz","landcover_manifest.csv","input_manifest.csv","design.json")
+if(!all(file.exists(file.path(root,needed)))) {
+  stop("Prepare real inputs first: Rscript scripts/prepare_genesis.R")
+}
+config <- jsonlite::read_json(file.path(root,"design.json"),simplifyVector=TRUE)
+stopifnot(params$radius_m %in% config$radii_m, params$bootstrap>=199,
+          params$min_coverage>0, params$min_coverage<=1)
+out <- "outputs/genesis"
+dir.create(out,recursive=TRUE,showWarnings=FALSE)
+set.seed(params$seed)
+```
+
+# Question and design
+
+The hypothesis is that **reported tornado genesis occurs preferentially over
+landscapes with lower aerodynamic roughness, conditional on the measured
+covariates and the matched comparison design**. A separate hypothesis is that
+roughness influences formation differently from persistence. We test two
+associations, without assuming that tornado ends are unaffected by roughness:
+
+1. **Paired endpoints:** is a tornado's reported start smoother than its own end?
+2. **Matched local background:** is a reported start smoother than nearby available
+   locations, after adjustment for elevation, elevation variability, and population?
+
+The study retains the original domain, **102–95°W and 36–42°N**, and uses SPC
+whole-track records from **2000–2024**. Eligibility is based on a valid start
+inside this domain. Actual ends outside the domain are retained, with additional
+land-cover coverage around them; endpoints are never created by clipping a track.
+An additional comparison restricts both ends to the domain to examine boundary
+selection. Neither analysis uses tornado-width buffers or cell-intersection counts.
+
+The [SPC actual-tornado archive](https://www.spc.noaa.gov/wcm/) is a curated
+whole-track source, not independent physical verification of every reported
+endpoint. We use `sg = 1` records, remove exact duplicate rows, and retain source
+row identifiers because `om` is not always unique. All intensity ratings are
+included. Maximum EF rating and final path length are not adjustment covariates:
+they could be consequences of the process being studied.
+
+# Whole tracks and endpoint quality
+
+```{r input}
+tracks <- readr::read_csv(file.path(root,"tracks.csv.gz"),show_col_types=FALSE)
+sites <- readr::read_csv(file.path(root,"sites.csv.gz"),show_col_types=FALSE)
+static <- readr::read_csv(file.path(root,"static_covariates.csv.gz"),show_col_types=FALSE)
+fractions <- readr::read_csv(file.path(root,"landcover_fractions.csv.gz"),show_col_types=FALSE)
+lookup <- readr::read_csv("data/metadata/aersurface_roughness.csv",show_col_types=FALSE)
+stopifnot(all(tracks$yr %in% 2000:2024),all(sites$landcover_year==sites$year-1),
+          !anyDuplicated(tracks$track_id),!anyDuplicated(sites$site_id),
+          all(sites$track_id %in% tracks$track_id))
+quality <- data.frame(
+  quantity=c("Eligible starts", "Invalid or missing ends", "Identical valid endpoints",
+             "Distinct valid endpoint pairs", "Distinct pairs with end outside domain"),
+  records=c(nrow(tracks),sum(!tracks$valid_end),
+            sum(tracks$valid_end & !tracks$distinct_end),sum(tracks$distinct_end),
+            sum(tracks$distinct_end & !tracks$end_in_domain)))
+knitr::kable(quality)
+annual <- as.data.frame(table(tracks$yr))
+names(annual) <- c("year","starts")
+ggplot(annual,aes(year,starts))+geom_col(fill="steelblue")+
+  labs(x=NULL,y="Reported whole-track starts")+theme(axis.text.x=element_text(angle=60,hjust=1))
+```
+
+Invalid ends are not imputed. Identical-coordinate tracks remain eligible for
+local-background modeling but cannot supply distinct paired endpoints. Coordinate
+rounding is especially relevant to short tracks and the 500 m scale. The report
+therefore includes a sensitivity analysis requiring at least 1 km endpoint
+separation; that restriction can itself select for persistence, so it is not the
+primary analysis.
+
+```{r map, fig.cap="Eligible starts in the original study domain."}
+starts_sf <- st_as_sf(tracks,coords=c("slon","slat"),crs=4326)
+states <- st_as_sf(maps::map("state",fill=TRUE,plot=FALSE))
+ggplot()+geom_sf(data=states,fill="gray97",color="gray60",linewidth=.3)+
+  geom_sf(data=starts_sf,color="steelblue",size=.5,alpha=.5)+
+  coord_sf(xlim=c(-102,-95),ylim=c(36,42),expand=FALSE)+labs(x=NULL,y=NULL)
+```
+
+# Pre-event aerodynamic roughness proxy
+
+Each event in year *y* uses **Annual NLCD land cover from year y − 1**, from
+Collection 1 Version 1 (1999–2023). This avoids assigning post-event forest loss
+to the tornado's pre-event landscape. Annual classification remains imperfect,
+and prior-year cover can miss land-use changes before the storm. The preparation
+script uses a bundled official discovery response from the
+[USGS Water STAC catalog](https://api.water.usgs.gov/gdp/pygeoapi/stac/stac-collection/nlcd/nlcd-LndCov?f=html),
+substitutes the year in the versioned annual filename, and caches native 30 m regional crops. It records source URLs, metadata and crop
+checksums, years, and resolution in the land-cover manifest.
+
+We assign seasonal aerodynamic roughness lengths to the 16 land-cover classes
+using non-airport, non-arid values from **EPA AERSURFACE Table 6-6**. The calendar
+proxy uses season 1 for November–February (no persistent snow assumed), season 3
+for March–May, season 4 for June–August, and season 5 for September–October.
+Actual snow cover, crop height, harvest dates, and airport footprints are not
+observed. These choices are approximations, not a complete AERSURFACE run.
+[Source and seasonal definitions](https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=P101DBVE.txt).
+
+Within each circular neighborhood, native pixel-center class fractions define an
+**isotropic geometric-mean roughness index**:
+
+\[
+\log_2 z_{0,\mathrm{index}}=\sum_c f_c\log_2 z_{0,c}.
+\]
+
+This is an explicit land-cover proxy, not a measurement of effective drag or a
+wind-direction-weighted inflow exposure. Equal-area projected pixels receive
+equal weights; the neighborhood boundary is approximated by pixel centers.
+We also fit a constant midsummer lookup sensitivity to assess the calendar
+assignment. Open water remains part of the available landscape; a low-water
+neighborhood sensitivity is included.
+
+```{r covariates}
+knitr::kable(lookup,digits=3,caption="EPA seasonal class roughness lengths in metres.")
+get_covariates <- function(radius) {
+  f <- fractions[fractions$radius_m==radius,]
+  if(nrow(f)!=nrow(sites)||anyDuplicated(f$site_id)) stop("Incomplete or duplicated land-cover cache")
+  x <- add_roughness(sites,f,lookup,params$min_coverage)
+  x <- merge(x,static,by="site_id",sort=FALSE)
+  if(nrow(x)!=nrow(sites)) stop("Incomplete static covariate cache")
+  x
+}
+x <- get_covariates(params$radius_m)
+knitr::kable(data.frame(quantity=c("Neighborhood radius (m)","Sampled reference points per start",
+    "Reference inner radius (km)","Reference outer radius (km)","Sites with insufficient land-cover coverage"),
+  value=c(params$radius_m,config$n_controls,config$inner_km,config$outer_km,sum(!x$landcover_ok))))
+```
+
+Elevation mean and neighborhood elevation SD come from the original 15-arc-second
+Viewfinder Panoramas DEM, evaluated over a fixed 1 km radius. These control for
+**topographic** variation separately from land-cover roughness. Interpolated GPW
+v3 **year-2000** density is a coarse, static reporting proxy. It does not account
+for all reporting differences, contemporary population, roads, visibility, or
+changes in damage indicators. Missing or invalid covariates exclude the whole
+matched set, not individual alternatives chosen selectively.
+
+# Paired endpoint comparison
+
+For each complete distinct pair, compute the start-minus-end difference in
+log2 roughness. Negative values mean the start is smoother. Bootstrap intervals
+resample **calendar days**, carrying all pairs from a sampled day together.
+Days are a proxy for shared storm/outbreak conditions, not validated storm IDs.
+
+```{r paired}
+paired <- complete_matched_sets(x,"endpoints",tracks=tracks)
+paired_stats <- paired_difference(paired,bootstrap=params$bootstrap,seed=params$seed)
+knitr::kable(paired_stats$summary,digits=3)
+ggplot(paired_stats$pairs,aes(difference))+geom_histogram(binwidth=.25,fill="steelblue",color="white")+
+  geom_vline(xintercept=0,linetype=2)+labs(x="Start minus end log2 roughness",y="Tornado pairs")
+```
+
+The conditional logistic model uses one start and one end per tornado, with a
+stratum for each track. A negative roughness coefficient indicates that a rougher
+location is less likely to be the start within its pair. This is **endpoint
+asymmetry among reported tornadoes**, not an absolute genesis probability or a
+causal estimate. Storm motion through geographic gradients, changing environments,
+and roughness-dependent termination can also create asymmetry.
+
+```{r paired-model}
+paired_unadjusted <- fit_genesis_clogit(paired,adjusted=FALSE)
+paired_adjusted <- fit_genesis_clogit(paired)
+summary(paired_adjusted)
+```
+
+# Matched local-background genesis model
+
+Each start is matched to **ten** locations sampled uniformly by area within a
+**2–10 km annulus**, restricted to the original domain. Boundary annuli are
+truncated by that domain, rather than wrapping or shifting. The random seed and
+all sampled coordinates are saved. These are reference locations, not confirmed
+non-tornadic storms, and a reference location may have experienced a tornado on
+another occasion. Whole tracks with missing or identical ends remain eligible.
+
+The response is the observed start (one case) versus its ten alternatives. Track
+strata hold shared event date, season, and broad local context fixed. The adjusted
+model includes log2 roughness, elevation mean, elevation SD, and log2(population + 1).
+All fitted models use Efron's conditional likelihood with one case per set, which
+agrees with the exact conditional likelihood here and permits robust sandwich
+covariance clustered by calendar day.
+
+```{r genesis-model}
+genesis <- complete_matched_sets(x,"genesis",n_controls=config$n_controls)
+genesis_unadjusted <- fit_genesis_clogit(genesis,adjusted=FALSE)
+genesis_adjusted <- fit_genesis_clogit(genesis)
+summary(genesis_adjusted)
+```
+
+```{r main-results}
+result <- function(model,design,adjustment,term="log2_z0") {
+  cbind(design=design,adjustment=adjustment,clogit_effect(model,term))
+}
+results <- rbind(result(paired_unadjusted,"Paired endpoints","Unadjusted"),
+                 result(paired_adjusted,"Paired endpoints","Adjusted"),
+                 result(genesis_unadjusted,"Local background","Unadjusted"),
+                 result(genesis_adjusted,"Local background","Adjusted"))
+knitr::kable(results,digits=3,caption="Odds ratios per doubling of neighborhood roughness, with date-clustered 95% intervals.")
+usage <- data.frame(design=c("Paired endpoints","Local background"),
+                    matched_sets=c(length(unique(paired$track_id)),length(unique(genesis$track_id))),
+                    days=c(length(unique(paired$event_date)),length(unique(genesis$event_date))))
+knitr::kable(usage)
+plot_results <- results
+plot_results$label <- paste(plot_results$design,tolower(plot_results$adjustment),sep=", ")
+plot_results$label <- factor(plot_results$label,levels=rev(plot_results$label))
+ggplot(plot_results,aes(odds_ratio,label,xmin=lower_95,xmax=upper_95))+
+  geom_pointrange()+geom_vline(xintercept=1,linetype=2)+scale_x_log10()+
+  labs(x="Odds ratio per doubling of roughness (95% interval)",y=NULL)
+```
+
+The adjusted local-background estimate is **`r round(clogit_effect(genesis_adjusted)$odds_ratio,3)`**
+(95% interval **`r round(clogit_effect(genesis_adjusted)$lower_95,3)`–`r round(clogit_effect(genesis_adjusted)$upper_95,3)`**)
+per doubling of the roughness index. The adjusted paired-endpoint estimate is
+**`r round(clogit_effect(paired_adjusted)$odds_ratio,3)`**
+(**`r round(clogit_effect(paired_adjusted)$lower_95,3)`–`r round(clogit_effect(paired_adjusted)$upper_95,3)`**).
+These two coefficients address different comparisons; their difference is not a
+formal test of genesis versus persistence.
+
+For the local-background model, an odds ratio below one indicates lower relative
+odds that a location is the reported start as roughness increases, within these
+sampled alternatives. The model does not estimate the chance that an arbitrary
+storm produces a tornado. Meteorological opportunity is unmeasured: nearby
+background locations were not necessarily traversed by the parent storm.
+Population adjustment and local matching do not establish “all else equal.”
+
+# Sensitivity and identification checks
+
+The neighborhood-scale fits below share the sampled sites and fixed 1 km terrain
+adjustments. The paired ≥1 km fit addresses very short or rounded tracks; the
+both-ends-inside fit examines boundary selection. The midsummer-only lookup
+removes seasonal class-value assignment. The low-water fit restricts complete
+matched sets to neighborhoods with less than 5% water at every alternative;
+this changes the geographic sample and is not a general correction for water.
+
+A developed-cover adjustment adds neighborhood developed fraction as another
+reporting/damage-indicator proxy. Because developed cover also contributes to
+roughness, this changes the conditional contrast. A separate genesis fit requires
+starts at least 10 km from the domain boundary, so reference annuli are untruncated.
+
+```{r sensitivity}
+sensitivity <- list()
+for(radius in config$radii_m) {
+  xx <- get_covariates(radius)
+  for(design in c("endpoints","genesis")) {
+    dd <- complete_matched_sets(xx,design,n_controls=config$n_controls,tracks=tracks)
+    sensitivity[[paste(radius,design)]] <- cbind(test=paste0(radius," m"),design=design,
+      sets=length(unique(dd$track_id)),clogit_effect(fit_genesis_clogit(dd)))
+  }
+}
+for(test in c("Endpoints at least 1 km apart","Both ends inside domain","Midsummer lookup","Low-water neighborhoods")) {
+  for(design in if(test %in% c("Endpoints at least 1 km apart","Both ends inside domain")) "endpoints" else c("endpoints","genesis")) {
+    xx <- x
+    if(test=="Low-water neighborhoods") xx$landcover_ok <- xx$landcover_ok & xx$water_fraction<.05
+    dd <- complete_matched_sets(xx,design,n_controls=config$n_controls,tracks=tracks,
+      min_displacement_km=if(test=="Endpoints at least 1 km apart") 1 else 0,
+      ends_inside=test=="Both ends inside domain")
+    term <- if(test=="Midsummer lookup") "log2_z0_summer" else "log2_z0"
+    sensitivity[[paste(test,design)]] <- cbind(test=test,design=design,
+      sets=length(unique(dd$track_id)),clogit_effect(fit_genesis_clogit(dd,roughness=term),term))
+  }
+}
+for(design in c("endpoints","genesis")) {
+  dd <- if(design=="endpoints") paired else genesis
+  sensitivity[[paste("Developed-cover adjustment",design)]] <- cbind(
+    test="Developed-cover adjustment",design=design,sets=length(unique(dd$track_id)),
+    clogit_effect(fit_genesis_clogit(dd,developed_adjustment=TRUE)))
+}
+start_geometry <- st_transform(st_as_sf(tracks,coords=c("slon","slat"),crs=4326),genesis_crs)
+edge_distance <- as.numeric(st_distance(start_geometry,
+  st_boundary(st_transform(genesis_domain(),genesis_crs))))/1000
+interior <- genesis[genesis$track_id %in% tracks$track_id[edge_distance>=config$outer_km],]
+sensitivity[["Untruncated reference annuli"]] <- cbind(test="Untruncated reference annuli",
+  design="genesis",sets=length(unique(interior$track_id)),clogit_effect(fit_genesis_clogit(interior)))
+sensitivity <- dplyr::bind_rows(sensitivity)
+knitr::kable(sensitivity,digits=3)
+```
+
+We examine the amount of within-set roughness variation: pairs with equal
+roughness provide no direct contrast for its coefficient. Confidence intervals
+are model-based, clustered by date, and do not propagate land-cover mapping,
+lookup-value, or coordinate uncertainty. Date clustering also leaves possible
+spatial dependence between events on different days unaddressed. Sensitivity fits are exploratory and
+are not multiple independent confirmations.
+
+```{r variation}
+variation <- function(d) {
+  span <- vapply(split(d$log2_z0,d$track_id),function(z) diff(range(z)),numeric(1))
+  data.frame(sets=length(span),zero_roughness_span=sum(span<1e-10),
+             median_log2_span=median(span))
+}
+knitr::kable(rbind(cbind(design="Endpoints",variation(paired)),
+                   cbind(design="Local background",variation(genesis))),digits=3)
+```
+
+# Interpretation and next steps
+
+For the primary adjusted local-background model, the 95% interval
+**`r if(clogit_effect(genesis_adjusted)$upper_95<1) "lies below one" else if(clogit_effect(genesis_adjusted)$lower_95>1) "lies above one" else "includes one"`**.
+For the paired model, it
+**`r if(clogit_effect(paired_adjusted)$upper_95<1) "lies below one" else if(clogit_effect(paired_adjusted)$lower_95>1) "lies above one" else "includes one"`**.
+With the default settings, both include one: the primary fits do not provide clear
+evidence of the proposed negative association. This does not establish absence
+of a physical effect.
+
+The developed-cover sensitivity gives a local-background odds ratio of
+**`r round(sensitivity$odds_ratio[sensitivity$test=="Developed-cover adjustment" & sensitivity$design=="genesis"],3)`**
+(95% interval
+**`r round(sensitivity$lower_95[sensitivity$test=="Developed-cover adjustment" & sensitivity$design=="genesis"],3)`–`r round(sensitivity$upper_95[sensitivity$test=="Developed-cover adjustment" & sensitivity$design=="genesis"],3)`**).
+This demonstrates sensitivity to the reporting-proxy specification. Developed
+cover also contributes to the exposure itself, so the additional adjustment
+changes the contrast being estimated. The endpoint result is also sensitive to
+seasonal lookup values and the low-water sample restriction. These exploratory
+results motivate better roughness and reporting measurements; they do not select
+a uniquely preferred physical explanation.
+
+
+The two comparisons address different questions. A smoother start than end could
+reflect preferential genesis, preferential termination over rough terrain, or
+storm motion across a roughness gradient. A smoother start than local background
+is more directly relevant to genesis location, but remains conditional on
+reporting and an approximate landscape availability definition. Neither design
+proves a physical effect or verifies the premise that persistence is unaffected.
+
+A stronger subsequent study would define available locations using radar-tracked
+parent storms, including non-tornadic storms, and test termination with detailed
+surveyed paths. Additional priorities are measured inflow direction, season-specific
+vegetation height, updated population/accessibility covariates, coordinate-jitter
+sensitivity, and alternative reference-distance/sampling seeds. Those checks are
+not claimed to have been completed here.
+
+Related endpoint designs include [Muncy (2021)](http://rave.ohiolink.edu/etdc/view?acc_num=ohiou1628513174226383)
+and [Dison (2026)](https://scholarsjunction.msstate.edu/td/6885/).
+The role of friction can be more complex than uniform suppression of genesis;
+see [Roberts and Xue (2017)](https://doi.org/10.1175/JAS-D-16-0364.1).
+
+# Saved results and provenance
+
+```{r outputs}
+readr::write_csv(quality,file.path(out,"track_quality.csv"))
+readr::write_csv(results,file.path(out,"main_effects.csv"))
+readr::write_csv(sensitivity,file.path(out,"sensitivity_effects.csv"))
+readr::write_csv(paired_stats$pairs,file.path(out,"paired_differences.csv"))
+readr::write_csv(x,file.path(out,"site_covariates.csv.gz"))
+saveRDS(list(paired=paired_adjusted,genesis=genesis_adjusted),file.path(out,"models.rds"))
+writeLines(capture.output(sessionInfo()),file.path(out,"sessionInfo.txt"))
+manifest <- readr::read_csv(file.path(root,"landcover_manifest.csv"),show_col_types=FALSE)
+knitr::kable(manifest[c("landcover_year","resolution_m","sites","crop_md5")])
+knitr::kable(readr::read_csv(file.path(root,"input_manifest.csv"),show_col_types=FALSE))
+sessionInfo()
+```

@@ -108,3 +108,53 @@ SPC, elevation and population checksums. Large downloaded archives and rendered
 outputs are ignored by Git. The compressed prepared tornado extracts are tracked.
 To refresh a source, remove its cached raw file and rerun preparation; the script
 selects the newest annual revision listed by NOAA. Revisions may change results.
+
+## Aerodynamic roughness and genesis: a separate analysis
+
+[`TornadoGenesis.Rmd`](TornadoGenesis.Rmd) uses **2000–2024 SPC whole tracks** with
+starts in the original domain, **prior-year Annual NLCD C1V1 land cover**, paired
+start/end conditional logistic regression, and a matched local-background genesis
+model. Ten reference points are sampled uniformly by area 2–10 km from each start,
+inside the original domain. Real ends outside the domain are retained. Invalid
+ends are never imputed; identical endpoints are excluded only from the paired fit.
+
+```sh
+Rscript scripts/setup.R
+Rscript scripts/render_genesis.R
+```
+
+The small prepared site tables are versioned, so the default report renders
+without downloading land-cover rasters. To regenerate the real inputs from source:
+
+```sh
+Rscript scripts/prepare_genesis.R
+Rscript -e 'testthat::test_dir("tests", stop_on_failure = TRUE)'
+Rscript scripts/render_genesis.R
+```
+
+Preparation caches 25 native-resolution regional land-cover crops (roughly 1 GB),
+plus intermediate neighborhoods. It can take several minutes and requires network
+access. Completed years/radii are cached. The source is discovered using a frozen
+USGS STAC response bundled in `data/metadata/nlcd_c1v1_1999_stac.json`; the annual
+filename template preserves the C1V1 version and changes only the year. The
+preparation script validates native 30 m resolution and records crop checksums.
+
+Open `outputs/genesis/TornadoGenesis.html`. Outputs include main and sensitivity
+effect estimates, paired differences, site covariates, models, and session details.
+Rmd parameters select the prepared 500, 1,000, or 2,000 m neighborhood radius,
+coverage threshold, bootstrap replicates, and bootstrap seed. The primary radius
+is 1,000 m. Sampling settings and coordinates are recorded in
+`data/processed/genesis/design.json` and `sites.csv.gz`.
+
+The aerodynamic measure is an isotropic geometric-mean **land-cover roughness
+index**, based on EPA AERSURFACE Table 6-6 seasonal lookup values. Fixed calendar
+seasons, non-airport assumptions, and non-arid shrub values are approximations;
+this is not a full AERSURFACE run or an estimate of effective tornado drag.
+Elevation variability is adjusted separately. Population remains a coarse,
+static year-2000 reporting proxy. Standard errors are clustered by calendar day.
+
+Endpoint asymmetry does not identify a genesis effect by itself, and local
+reference points are available landscape, not confirmed storm opportunities or
+non-tornadic controls. The report includes scale, endpoint-separation, boundary,
+seasonal-lookup and low-water sensitivities, and identifies remaining reporting,
+coordinate, meteorological, and land-cover uncertainty.

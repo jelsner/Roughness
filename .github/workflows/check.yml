@@ -17,7 +17,9 @@ jobs:
             any::sf
             any::terra
             any::readr
+            any::dplyr
+            any::survival
             any::testthat
           cache-version: 1
-      - name: Test geometry, raster aggregation, and coordinate handling
-        run: Rscript -e 'testthat::test_file("tests/test-analysis.R", stop_on_failure = TRUE)'
+      - name: Test spatial analysis and matched genesis models
+        run: Rscript -e 'testthat::test_dir("tests", stop_on_failure = TRUE)'

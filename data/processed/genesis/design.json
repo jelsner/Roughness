@@ -1,0 +1,13 @@
+{
+  "projected_crs": "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=WGS84 +units=m +no_defs",
+  "bbox": [-102, -95, 36, 42],
+  "years": [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
+  "n_controls": 10,
+  "inner_km": 2,
+  "outer_km": 10,
+  "seed": 20261014,
+  "radii_m": [500, 1000, 2000],
+  "landcover_collection": "Annual NLCD C1V1",
+  "landcover_lag_years": 1,
+  "design_sha256": "3872ad39ed27c5079eadb98e258bfd03288c12b50031c520a4738f6de67cee58"
+}

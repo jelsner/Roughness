@@ -33,3 +33,35 @@ report segmentation, observation changes, straight-line path approximation,
 spatial confounding, and approximate confidence intervals remain limitations.
 The full report includes quality tables and diagnostic plots. No spatial block
 validation or causal identification has been performed.
+
+
+# Genesis analysis, October 14, 2026
+
+`TornadoGenesis.Rmd` rendered successfully with real 2000–2024 SPC whole-track
+records and prior-year 1999–2023 Annual NLCD C1V1 land cover. All 36 combined test
+assertions passed without warnings or failures. The prepared data contain 3,605
+eligible starts, 36,050 sampled background locations, and 2,597 distinct valid ends.
+There are 45 invalid/missing ends and 963 identical valid endpoint pairs; neither
+is imputed for the paired analysis. Thirty-three distinct ends lie outside the
+original domain and are retained with a land-cover halo. All static covariates
+are finite. The default report uses a 1 km roughness neighborhood and 2–10 km
+reference annuli, with calendar-day clustered standard errors.
+
+| Default adjusted comparison | Odds ratio per doubling of roughness index | 95% interval |
+| --- | ---: | ---: |
+| Start versus end, matched by tornado | 0.882 | 0.756–1.028 |
+| Start versus local background, matched by tornado | 0.980 | 0.910–1.055 |
+
+Both primary intervals include one. With additional developed-cover adjustment,
+the local-background odds ratio is 0.919 (0.855–0.987). The paired estimate is
+also sensitive to seasonal lookup and water restrictions. These exploratory
+sensitivities change the exposure contrast or the geographic sample; they do not
+establish the proposed physical mechanism. Date clustering does not address
+persistent spatial dependence across days. Land-cover lookup, coordinate,
+reporting, and meteorological opportunity uncertainties remain.
+
+The cached preparation script was rerun successfully without new downloads, and
+the report renders offline using the versioned prepared tables. The native annual
+rasters are ignored by Git. The report's land-cover manifest records each crop's
+checksum and source URL; the input manifest includes the pinned USGS discovery
+response and EPA lookup table.
