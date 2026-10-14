@@ -1,0 +1,5 @@
+design,adjustment,log_odds,robust_se,odds_ratio,lower_95,upper_95,source_commit,boundary_note
+Paired endpoints,Unadjusted,-0.1536358114831499,0.07365100654128086,0.8575842864956271,0.7423074382949292,0.9907630861594692,bc03c95,Four-corner projected boundary; 51 background points north of 42N
+Paired endpoints,Adjusted,-0.1259016699430214,0.0784271092086033,0.881701540283752,0.7560718981195631,1.0282059260134084,bc03c95,Four-corner projected boundary; 51 background points north of 42N
+Local background,Unadjusted,-0.026057866801113782,0.03763614200573627,0.9742787095851823,0.9049960452942587,1.048865361220811,bc03c95,Four-corner projected boundary; 51 background points north of 42N
+Local background,Adjusted,-0.02027896365947008,0.03776177180860731,0.9799252716341805,0.9100169653490224,1.0552039956958743,bc03c95,Four-corner projected boundary; 51 background points north of 42N

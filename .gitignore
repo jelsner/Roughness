@@ -7,3 +7,5 @@ outputs/
 renv/library/
 renv/staging/
 *.part
+
+data/processed/genesis/PREPARING

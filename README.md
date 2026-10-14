@@ -114,7 +114,7 @@ selects the newest annual revision listed by NOAA. Revisions may change results.
 [`TornadoGenesis.Rmd`](TornadoGenesis.Rmd) uses **2000–2024 SPC whole tracks** with
 starts in the original domain, **prior-year Annual NLCD C1V1 land cover**, paired
 start/end conditional logistic regression, and a matched local-background genesis
-model. Ten reference points are sampled uniformly by area 2–10 km from each start,
+model. Ten reference points are sampled uniformly by area 5–30 km from each start,
 inside the original domain. Real ends outside the domain are retained. Invalid
 ends are never imputed; identical endpoints are excluded only from the paired fit.
 
@@ -158,3 +158,13 @@ reference points are available landscape, not confirmed storm opportunities or
 non-tornadic controls. The report includes scale, endpoint-separation, boundary,
 seasonal-lookup and low-water sensitivities, and identifies remaining reporting,
 coordinate, meteorological, and land-cover uncertainty.
+
+
+The current reference annulus is **5–30 km**. Reference coordinates are checked
+against the exact longitude/latitude bounds. A boundary regression test covers
+northern-edge sampling. The earlier 2–10 km estimates are preserved in
+`data/metadata/genesis_reference_2_10_baseline.csv`; their sampler admitted 51
+reference points north of 42°N, so the report flags the comparison as including
+both the distance change and this correction. Preparation marks incomplete data
+and records the sampled-design hash in the land-cover manifest to prevent
+rendering a mixture of old covariates and newly sampled reference points.

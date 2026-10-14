@@ -65,3 +65,32 @@ the report renders offline using the versioned prepared tables. The native annua
 rasters are ignored by Git. The report's land-cover manifest records each crop's
 checksum and source URL; the input manifest includes the pinned USGS discovery
 response and EPA lookup table.
+
+
+# Reference annulus rerun: 5–30 km
+
+On October 14, 2026, the reference inner radius was increased to 5 km and the
+outer radius to 30 km. Ten points per start, the original study domain,
+2000–2024 tracks, prior-year cover, and the exposure-neighborhood radii were
+retained. All 36,050 new reference points satisfy the exact longitude/latitude
+bounds and the 5–30 km projected-distance limits. All 126,756 site/radius records
+have complete land-cover coverage, and their class fractions sum to one. All
+static covariates are finite. The report rendered without warnings.
+
+The earlier sampler projected only four rectangle corners, admitting 51 of its
+36,050 reference points slightly north of 42°N. The new sampler checks exact
+geographic bounds; the domain polygon is densified for projected boundary-distance
+calculations. The comparison therefore includes both the annulus change and this
+correction. A northern-edge regression test was added: 37 assertions now pass.
+Preparation now checks crop coverage and prevents rendering incomplete data.
+
+| Adjusted local-background model | Odds ratio | 95% interval |
+| --- | ---: | ---: |
+| Earlier 2–10 km (original boundary implementation) | 0.980 | 0.910–1.055 |
+| Current 5–30 km (exact geographic bounds) | 0.977 | 0.907–1.052 |
+
+The paired endpoint estimates are numerically unchanged (verified to 1e-10).
+The developed-cover-adjusted genesis sensitivity now gives 0.932 (0.866–1.002),
+and the untruncated-annulus sensitivity gives 1.012 (0.923–1.111) using 3,009 sets.
+The earlier estimates are preserved in a versioned baseline CSV and compared in
+the report. These results remain inconclusive under the primary specification.

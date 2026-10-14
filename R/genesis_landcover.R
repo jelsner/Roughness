@@ -14,7 +14,14 @@ prepare_landcover_year <- function(year,sites,config,design_hash) {
   href <- sub("_1999_",paste0("_",year,"_"),asset$href,fixed=TRUE)
   url <- paste0(sub("/$","",endpoint),"/",sub("^s3://","",href))
   raster_path <- file.path("data/raw/genesis",paste0("landcover_",year,".tif"))
-  if(!file.exists(raster_path)) {
+  needs_crop <- !file.exists(raster_path)
+  if(!needs_crop) {
+    existing <- terra::rast(raster_path)
+    required <- as.vector(terra::ext(terra::project(p,terra::crs(existing)))+max(config$radii_m))
+    available <- as.vector(terra::ext(existing))
+    needs_crop <- any(required[c(1,3)]<available[c(1,3)]) || any(required[c(2,4)]>available[c(2,4)])
+  }
+  if(needs_crop) {
     remote <- terra::rast(paste0("/vsicurl/",url))
     q <- terra::project(p,terra::crs(remote))
     bbox <- terra::ext(q)+max(config$radii_m)+90
@@ -36,7 +43,7 @@ prepare_landcover_year <- function(year,sites,config,design_hash) {
     }
     pieces[[as.character(radius)]] <- readRDS(cached)
   }
-  metadata <- data.frame(landcover_year=year,item_url=item_url,
+  metadata <- data.frame(landcover_year=year,design_sha256=design_hash,item_url=item_url,
     raster_url=url,crop_md5=unname(tools::md5sum(raster_path)),
     metadata_md5=unname(tools::md5sum(metadata_path)),
     retrieved_utc=format(file.info(raster_path)$mtime,tz="UTC",usetz=TRUE),

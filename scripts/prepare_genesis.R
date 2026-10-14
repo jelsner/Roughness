@@ -5,8 +5,9 @@ Sys.setenv(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", CPL_VSIL_CURL_ALLOWED_EXTEN
            GDAL_HTTP_MULTIRANGE="YES", VSI_CACHE="TRUE", VSI_CACHE_SIZE="50000000")
 dir.create("data/raw/genesis",recursive=TRUE,showWarnings=FALSE)
 dir.create("data/processed/genesis",recursive=TRUE,showWarnings=FALSE)
+writeLines("Preparation in progress; render only after completion.","data/processed/genesis/PREPARING")
 config <- list(projected_crs=genesis_crs,bbox=c(-102,-95,36,42),years=2000:2024,n_controls=10L,
-               inner_km=2,outer_km=10,seed=20261014L,radii_m=c(500,1000,2000),
+               inner_km=5,outer_km=30,seed=20261014L,radii_m=c(500,1000,2000),
                landcover_collection="Annual NLCD C1V1",landcover_lag_years=1L)
 fetch <- function(url,path) {
   if(!file.exists(path)) {
@@ -43,6 +44,7 @@ if(!file.exists(static_path)) {
   saveRDS(static,static_path)
 }
 readr::write_csv(readRDS(static_path),"data/processed/genesis/static_covariates.csv.gz")
+if("--design-only" %in% commandArgs(trailingOnly=TRUE)) quit(save="no",status=0)
 all_fractions <- list(); manifest <- list()
 # One compact regional native-resolution raster per year, shared across all sites/radii.
 # The rectangle includes all actual ends (even outside the domain) and buffer halos.
@@ -59,4 +61,5 @@ readr::write_csv(dplyr::bind_rows(all_fractions),"data/processed/genesis/landcov
 inputs <- c(raw,"data/raw/elevation/15-H.tif","usadens.zip","data/metadata/aersurface_roughness.csv","data/metadata/nlcd_c1v1_1999_stac.json")
 readr::write_csv(data.frame(path=inputs,md5=unname(tools::md5sum(inputs))),
                   "data/processed/genesis/input_manifest.csv")
+unlink("data/processed/genesis/PREPARING")
 message("Prepared ",nrow(tracks)," starts and ",sum(tracks$distinct_end)," distinct endpoint pairs.")

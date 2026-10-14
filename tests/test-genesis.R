@@ -26,8 +26,12 @@ test_that("reference samples respect distance, domain, and reproducibility", {
   a<-sf::st_transform(sf::st_as_sf(q[q$role=="start",],coords=c("lon","lat"),crs=4326),genesis_crs)
   b<-sf::st_transform(sf::st_as_sf(q[q$role=="background",],coords=c("lon","lat"),crs=4326),genesis_crs)
   d<-as.numeric(sf::st_distance(a,b))
-  expect_true(all(d>=2000 & d<=10000))
-  expect_true(all(lengths(sf::st_covered_by(b,sf::st_transform(genesis_domain(),genesis_crs)))==1))
+  expect_true(all(d>=5000 & d<=30000))
+  expect_true(all(q$lon>=-102 & q$lon<=-95 & q$lat>=36 & q$lat<=42))
+  s$slon <- -98; s$slat <- 41.999; s$elon <- -97.9; s$elat <- 41.9
+  readr::write_csv(s,p)
+  north <- make_genesis_sites(prepare_whole_tracks(p),n_controls=100,seed=42)
+  expect_true(all(north$lat<=42 & north$lat>=36))
 })
 test_that("class fractions and geometric roughness agree on a known landscape", {
   r<-terra::rast(xmin=-2000,xmax=2000,ymin=-2000,ymax=2000,resolution=30,crs=genesis_crs)

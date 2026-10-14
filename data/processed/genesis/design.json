@@ -3,11 +3,11 @@
   "bbox": [-102, -95, 36, 42],
   "years": [2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024],
   "n_controls": 10,
-  "inner_km": 2,
-  "outer_km": 10,
+  "inner_km": 5,
+  "outer_km": 30,
   "seed": 20261014,
   "radii_m": [500, 1000, 2000],
   "landcover_collection": "Annual NLCD C1V1",
   "landcover_lag_years": 1,
-  "design_sha256": "3872ad39ed27c5079eadb98e258bfd03288c12b50031c520a4738f6de67cee58"
+  "design_sha256": "63c60cf13d31fe9a72efe46b59d7acd2725da7eff0a98ebcd40ac71aceb8ab71"
 }

@@ -20,6 +20,7 @@ library(sf)
 source("R/genesis.R")
 theme_set(theme_minimal(base_size=12))
 root <- "data/processed/genesis"
+if(file.exists(file.path(root,"PREPARING"))) stop("Genesis data preparation is in progress; finish scripts/prepare_genesis.R before rendering")
 needed <- c("tracks.csv.gz","sites.csv.gz","static_covariates.csv.gz",
             "landcover_fractions.csv.gz","landcover_manifest.csv","input_manifest.csv","design.json")
 if(!all(file.exists(file.path(root,needed)))) {
@@ -28,6 +29,12 @@ if(!all(file.exists(file.path(root,needed)))) {
 config <- jsonlite::read_json(file.path(root,"design.json"),simplifyVector=TRUE)
 stopifnot(params$radius_m %in% config$radii_m, params$bootstrap>=199,
           params$min_coverage>0, params$min_coverage<=1)
+prepared_manifest <- readr::read_csv(file.path(root,"landcover_manifest.csv"),show_col_types=FALSE)
+if(!"design_sha256" %in% names(prepared_manifest) ||
+   !all(prepared_manifest$design_sha256==config$design_sha256) ||
+   !setequal(prepared_manifest$landcover_year,config$years-1L)) {
+  stop("Land-cover manifest does not match the sampled design; rerun preparation")
+}
 out <- "outputs/genesis"
 dir.create(out,recursive=TRUE,showWarnings=FALSE)
 set.seed(params$seed)
@@ -70,6 +77,7 @@ lookup <- readr::read_csv("data/metadata/aersurface_roughness.csv",show_col_type
 stopifnot(all(tracks$yr %in% 2000:2024),all(sites$landcover_year==sites$year-1),
           !anyDuplicated(tracks$track_id),!anyDuplicated(sites$site_id),
           all(sites$track_id %in% tracks$track_id))
+
 quality <- data.frame(
   quantity=c("Eligible starts", "Invalid or missing ends", "Identical valid endpoints",
              "Distinct valid endpoint pairs", "Distinct pairs with end outside domain"),
@@ -77,6 +85,17 @@ quality <- data.frame(
             sum(tracks$valid_end & !tracks$distinct_end),sum(tracks$distinct_end),
             sum(tracks$distinct_end & !tracks$end_in_domain)))
 knitr::kable(quality)
+references <- sites[sites$role=="background",]
+origins <- sites[sites$role=="start",]
+origins <- origins[match(references$track_id,origins$track_id),]
+xy_start <- st_coordinates(st_transform(st_as_sf(origins,coords=c("lon","lat"),crs=4326),genesis_crs))
+xy_reference <- st_coordinates(st_transform(st_as_sf(references,coords=c("lon","lat"),crs=4326),genesis_crs))
+reference_distance_km <- sqrt(rowSums((xy_reference-xy_start)^2))/1000
+stopifnot(all(reference_distance_km>=config$inner_km-1e-6),
+          all(reference_distance_km<=config$outer_km+1e-6),
+          all(references$lon>=-102 & references$lon<=-95 & references$lat>=36 & references$lat<=42))
+knitr::kable(data.frame(reference_points=nrow(references),
+  minimum_distance_km=min(reference_distance_km),maximum_distance_km=max(reference_distance_km)),digits=3)
 annual <- as.data.frame(table(tracks$yr))
 names(annual) <- c("year","starts")
 ggplot(annual,aes(year,starts))+geom_col(fill="steelblue")+
@@ -185,8 +204,15 @@ summary(paired_adjusted)
 
 # Matched local-background genesis model
 
+This rerun uses a 5–30 km reference annulus. Reference points are now checked
+against the exact longitude/latitude bounds. The earlier four-corner projected
+polygon admitted 51 points slightly north of 42°N in the 2–10 km run. Differences
+from that published run therefore include both the annulus change and this correction.
+The wider annulus increases landscape contrast and also allows larger meteorological
+and reporting gradients between a start and its reference locations.
+
 Each start is matched to **ten** locations sampled uniformly by area within a
-**2–10 km annulus**, restricted to the original domain. Boundary annuli are
+**`r config$inner_km`–`r config$outer_km` km annulus**, restricted to the original domain. Boundary annuli are
 truncated by that domain, rather than wrapping or shifting. The random seed and
 all sampled coordinates are saved. These are reference locations, not confirmed
 non-tornadic storms, and a reference location may have experienced a tornado on
@@ -242,6 +268,27 @@ storm produces a tornado. Meteorological opportunity is unmeasured: nearby
 background locations were not necessarily traversed by the parent storm.
 Population adjustment and local matching do not establish “all else equal.”
 
+# Reference-annulus comparison
+
+The earlier 2–10 km estimates are preserved from commit `bc03c95`. Its sampler
+admitted 51 background points north of the intended boundary. The comparison below
+therefore includes both the annulus change and the boundary correction; it does
+not isolate a distance effect. It is shown only at the original 1 km exposure scale.
+
+```{r annulus-comparison, results='asis'}
+if(params$radius_m==1000) {
+  baseline <- readr::read_csv("data/metadata/genesis_reference_2_10_baseline.csv",show_col_types=FALSE)
+  old <- baseline[baseline$design=="Local background",]
+  new <- results[results$design=="Local background",]
+  comparison <- rbind(
+    data.frame(annulus="2–10 km (earlier boundary)",old[c("adjustment","odds_ratio","lower_95","upper_95")]),
+    data.frame(annulus=paste0(config$inner_km,"–",config$outer_km," km (exact bounds)"),
+               new[c("adjustment","odds_ratio","lower_95","upper_95")]))
+  cat(knitr::kable(comparison,format="html",digits=3),sep="\n")
+  readr::write_csv(comparison,file.path(out,"reference_annulus_comparison.csv"))
+}
+```
+
 # Sensitivity and identification checks
 
 The neighborhood-scale fits below share the sampled sites and fixed 1 km terrain
@@ -254,7 +301,7 @@ this changes the geographic sample and is not a general correction for water.
 A developed-cover adjustment adds neighborhood developed fraction as another
 reporting/damage-indicator proxy. Because developed cover also contributes to
 roughness, this changes the conditional contrast. A separate genesis fit requires
-starts at least 10 km from the domain boundary, so reference annuli are untruncated.
+starts at least `r config$outer_km` km from the domain boundary, so reference annuli are untruncated.
 
 ```{r sensitivity}
 sensitivity <- list()
@@ -317,9 +364,9 @@ For the primary adjusted local-background model, the 95% interval
 **`r if(clogit_effect(genesis_adjusted)$upper_95<1) "lies below one" else if(clogit_effect(genesis_adjusted)$lower_95>1) "lies above one" else "includes one"`**.
 For the paired model, it
 **`r if(clogit_effect(paired_adjusted)$upper_95<1) "lies below one" else if(clogit_effect(paired_adjusted)$lower_95>1) "lies above one" else "includes one"`**.
-With the default settings, both include one: the primary fits do not provide clear
-evidence of the proposed negative association. This does not establish absence
-of a physical effect.
+An interval below one supports a negative association under that specification;
+an interval including one leaves the direction uncertain. These comparisons do
+not establish the presence or absence of a physical effect.
 
 The developed-cover sensitivity gives a local-background odds ratio of
 **`r round(sensitivity$odds_ratio[sensitivity$test=="Developed-cover adjustment" & sensitivity$design=="genesis"],3)`**

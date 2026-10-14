@@ -2,8 +2,15 @@
 # WGS84 Albers matches the native NLCD projection without remote datum-grid downloads.
 genesis_crs <- "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=WGS84 +units=m +no_defs"
 genesis_domain <- function(bbox = c(-102, -95, 36, 42)) {
-  sf::st_as_sfc(sf::st_bbox(c(xmin=bbox[1], xmax=bbox[2], ymin=bbox[3], ymax=bbox[4]), crs=4326))
+  # Densify constant-latitude edges before projection; four projected corners
+  # alone replace latitude boundaries with straight chords.
+  lon <- seq(bbox[1],bbox[2],length.out=201)
+  lat <- seq(bbox[3],bbox[4],length.out=201)
+  ring <- rbind(cbind(lon,bbox[3]),cbind(bbox[2],lat[-1]),
+                cbind(rev(lon)[-1],bbox[4]),cbind(bbox[1],rev(lat)[-1]))
+  sf::st_sfc(sf::st_polygon(list(ring)),crs=4326)
 }
+
 valid_endpoint <- function(lon, lat) {
   is.finite(lon) & is.finite(lat) & lon >= -180 & lon <= 180 &
     lat >= -90 & lat <= 90 & lon != 0 & lat != 0
@@ -42,10 +49,9 @@ prepare_whole_tracks <- function(path, bbox=c(-102,-95,36,42), years=2000:2024) 
 }
 
 make_genesis_sites <- function(tracks, bbox=c(-102,-95,36,42), n_controls=10L,
-                               inner_km=2, outer_km=10, seed=20261014) {
+                               inner_km=5, outer_km=30, seed=20261014) {
   stopifnot(n_controls >= 1, inner_km >= 0, outer_km > inner_km)
   set.seed(seed)
-  domain <- sf::st_transform(genesis_domain(bbox),genesis_crs)
   starts <- sf::st_transform(sf::st_as_sf(tracks, coords=c("slon","slat"),
                                          crs=4326, remove=FALSE),genesis_crs)
   xy <- sf::st_coordinates(starts)
@@ -61,7 +67,9 @@ make_genesis_sites <- function(tracks, bbox=c(-102,-95,36,42), n_controls=10L,
       angle <- runif(length(distance),0,2*pi)
       q <- cbind(xy[i,1]+distance*cos(angle), xy[i,2]+distance*sin(angle))
       qsf <- sf::st_as_sf(data.frame(x=q[,1],y=q[,2]),coords=c("x","y"),crs=genesis_crs)
-      inside <- lengths(sf::st_covered_by(qsf,domain)) > 0
+      geographic <- sf::st_coordinates(sf::st_transform(qsf,4326))
+      inside <- geographic[,1]>=bbox[1] & geographic[,1]<=bbox[2] &
+        geographic[,2]>=bbox[3] & geographic[,2]<=bbox[4]
       candidates <- rbind(candidates,q[inside,,drop=FALSE])
     }
     qsf <- sf::st_transform(sf::st_as_sf(data.frame(
